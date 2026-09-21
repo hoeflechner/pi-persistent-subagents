@@ -51,8 +51,12 @@ interface YieldHolder {
 export interface SdkHostOptions {
   /** Project working directory for child sessions. */
   cwd: string;
-  /** Where child Pi session JSONL files live (user-local, NOT the project). */
-  sessionDir: string;
+  /**
+   * Where child Pi session JSONL files live. Omit to use Pi's default
+   * (~/.pi/agent/sessions/, organized by cwd) so sessions show up in /resume.
+   * Never point this into the project tree.
+   */
+  sessionDir?: string;
   /** Pi agent config dir. Default: ~/.pi/agent (Pi default). */
   agentDir?: string;
   /**
@@ -92,6 +96,7 @@ export class PiSdkSessionHost implements SessionHost {
   constructor(private readonly opts: SdkHostOptions) {}
 
   async create(spec: NewSessionSpec): Promise<PiSdkSession> {
+    // Undefined sessionDir => Pi default (~/.pi/agent/sessions/, by cwd).
     const sessionManager = SessionManager.create(this.opts.cwd, this.opts.sessionDir);
     const holder: YieldHolder = {};
     // Model policy: explicit pattern wins; "auto"/unset mirrors the caller's

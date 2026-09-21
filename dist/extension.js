@@ -89,7 +89,12 @@ function getServices(cwd) {
     };
     const host = new PiSdkSessionHost({
         cwd,
-        sessionDir: path.join(stateDir, "sessions"),
+        // Default: Pi's own session dir (~/.pi/agent/sessions/, organized by cwd)
+        // so managed sessions are visible in /resume. Override with
+        // PI_SUBAGENTS_SESSION_DIR to isolate them elsewhere.
+        ...(process.env.PI_SUBAGENTS_SESSION_DIR
+            ? { sessionDir: process.env.PI_SUBAGENTS_SESSION_DIR }
+            : {}),
         onDispatch: (sessionId, ctx) => svc.callerContext.set(sessionId, ctx),
         // Managed sessions get delegate/list_agents too, so agents can talk to
         // each other (nested delegation). execute() resolves the caller from the

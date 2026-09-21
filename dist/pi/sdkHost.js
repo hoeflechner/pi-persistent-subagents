@@ -52,6 +52,7 @@ export class PiSdkSessionHost {
         this.opts = opts;
     }
     async create(spec) {
+        // Undefined sessionDir => Pi default (~/.pi/agent/sessions/, by cwd).
         const sessionManager = SessionManager.create(this.opts.cwd, this.opts.sessionDir);
         const holder = {};
         // Model policy: explicit pattern wins; "auto"/unset mirrors the caller's

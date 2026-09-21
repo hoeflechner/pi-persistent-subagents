@@ -26,8 +26,12 @@ interface YieldHolder {
 export interface SdkHostOptions {
     /** Project working directory for child sessions. */
     cwd: string;
-    /** Where child Pi session JSONL files live (user-local, NOT the project). */
-    sessionDir: string;
+    /**
+     * Where child Pi session JSONL files live. Omit to use Pi's default
+     * (~/.pi/agent/sessions/, organized by cwd) so sessions show up in /resume.
+     * Never point this into the project tree.
+     */
+    sessionDir?: string;
     /** Pi agent config dir. Default: ~/.pi/agent (Pi default). */
     agentDir?: string;
     /**
