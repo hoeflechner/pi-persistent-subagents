@@ -1,0 +1,41 @@
+{
+  "name": "pi-persistent-subagents",
+  "version": "0.1.0",
+  "description": "Pi coding-agent extension: persistent, project-scoped named agent sessions with fire-and-forget delegation and durable callbacks.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "pi-extension",
+    "subagent",
+    "persistent-sessions"
+  ],
+  "pi": {
+    "extensions": ["./dist/extension.js"]
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "doc"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.86.1",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "dependencies": {
+    "typebox": "^1.3.27",
+    "yaml": "^2.9.1"
+  }
+}

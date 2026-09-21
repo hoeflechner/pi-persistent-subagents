@@ -1,0 +1,6 @@
+node_modules/
+*.log
+.vitest/
+coverage/
+probe-tools*.mjs
+research/
