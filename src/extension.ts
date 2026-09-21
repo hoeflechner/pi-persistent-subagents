@@ -58,19 +58,28 @@ interface Services {
  * better than a lost callback; confirm() normally clears inFlight first). */
 const REDRIVE_COOLDOWN_MS = 30_000;
 
-let services: Services | undefined;
+/**
+ * Services per project cwd — NOT process.cwd(). A long-lived host process
+ * (e.g. the pi-web session daemon, WORKDIR /app in Docker) serves sessions
+ * whose cwd differs from its own; project identity, child-session cwd, and
+ * the projectId hash must come from the *session's* cwd (ctx.cwd), never
+ * from the host process working directory.
+ */
+const servicesByCwd = new Map<string, Services>();
 
 function getStateDir(): string {
   return process.env.PI_SUBAGENTS_STATE_DIR ?? path.join(getAgentDir(), "subagents");
 }
 
 function getServices(cwd: string): Services {
-  if (services) return services;
+  const key = path.resolve(cwd);
+  const existing = servicesByCwd.get(key);
+  if (existing) return existing;
   const stateDir = getStateDir();
-  const projectId = canonicalProjectId(cwd);
+  const projectId = canonicalProjectId(key);
   const profiles = new ProfileStore({
     userProfilesFile: path.join(stateDir, "profiles.yaml"),
-    projectRoot: cwd,
+    projectRoot: key,
     projectTrusted: () => true, // refined by the project_trust hook below
   });
   const registry = new SessionRegistry(stateDir);
@@ -127,7 +136,7 @@ function getServices(cwd: string): Services {
   };
 
   const host = new PiSdkSessionHost({
-    cwd,
+    cwd: key,
     // Default: Pi's own session dir (~/.pi/agent/sessions/, organized by cwd)
     // so managed sessions are visible in /resume. Override with
     // PI_SUBAGENTS_SESSION_DIR to isolate them elsewhere.
@@ -138,12 +147,12 @@ function getServices(cwd: string): Services {
     // Managed sessions get delegate/list_agents too, so agents can talk to
     // each other (nested delegation). execute() resolves the caller from the
     // per-session ExtensionContext, so one shared instance serves all sessions.
-    buildExtraTools: () => [makeDelegateTool(svc), makeListAgentsTool(svc)],
+    buildExtraTools: () => [makeDelegateTool(), makeListAgentsTool()],
   });
   const router = new DelegationRouter({ projectId, profiles, registry, calls, mailboxes, host, deliverer });
 
   // Populate the SAME object the deliverer closure captured above.
-  svc.cwd = cwd;
+  svc.cwd = key;
   svc.projectId = projectId;
   svc.stateDir = stateDir;
   svc.profiles = profiles;
@@ -157,8 +166,8 @@ function getServices(cwd: string): Services {
   svc.callerContext = new Map();
   svc.inFlight = new Map();
   svc.started = false;
-  services = svc;
-  return services;
+  servicesByCwd.set(key, svc);
+  return svc;
 }
 
 /** Locate the caller's transcript file for delivery confirmation. */
@@ -173,8 +182,9 @@ async function transcriptFor(
   return record?.sessionPath;
 }
 
-/** delegate tool, shared between the root session and managed sessions. */
-function makeDelegateTool(svc: Services): ToolDefinition {
+/** delegate tool, shared between the root session and managed sessions.
+ * Resolves services from the *calling session's* cwd at execute time. */
+function makeDelegateTool(): ToolDefinition {
   return defineTool({
     name: DELEGATE_TOOL,
     label: "Delegate to agent",
@@ -200,6 +210,7 @@ function makeDelegateTool(svc: Services): ToolDefinition {
       prompt: Type.String({ description: "The complete task for the agent." }),
     }),
     execute: async (_id, params, _signal, _onUpdate, ctx) => {
+      const svc = getServices(ctx.cwd);
       const caller = resolveCaller(svc, ctx);
       const receipt = await svc.router.delegate(
         { agent: params.agent, prompt: params.prompt },
@@ -214,7 +225,7 @@ function makeDelegateTool(svc: Services): ToolDefinition {
 }
 
 /** list_agents tool, shared between the root session and managed sessions. */
-function makeListAgentsTool(svc: Services): ToolDefinition {
+function makeListAgentsTool(): ToolDefinition {
   return defineTool({
     name: LIST_AGENTS_TOOL,
     label: "List agents",
@@ -223,7 +234,8 @@ function makeListAgentsTool(svc: Services): ToolDefinition {
       "and last-used times.",
     promptSnippet: "list_agents() shows which named agents can be delegated to.",
     parameters: Type.Object({}),
-    execute: async () => {
+    execute: async (_id, _params, _signal, _onUpdate, ctx) => {
+      const svc = getServices(ctx.cwd);
       const [profiles, sessions] = await Promise.all([
         svc.profiles.list(),
         svc.registry.list(),
@@ -242,16 +254,17 @@ function makeListAgentsTool(svc: Services): ToolDefinition {
 }
 
 export default function persistentSubagents(pi: ExtensionAPI): void {
-  const svc = getServices(process.cwd());
-  svc.rootApi = pi;
-
-  pi.registerTool(makeDelegateTool(svc));
-  pi.registerTool(makeListAgentsTool(svc));
+  // NOTE: never bind services to process.cwd() here — the host process cwd
+  // (e.g. /app in a Docker daemon) is not the session cwd. Everything is
+  // resolved from ctx.cwd at use time.
+  pi.registerTool(makeDelegateTool());
+  pi.registerTool(makeListAgentsTool());
 
   pi.registerCommand("subagents", {
     description:
       "Inspect persistent subagent sessions (overview, doctor, reset <agent>, model <agent> [pattern|default])",
     handler: async (args, ctx) => {
+      const svc = getServices(ctx.cwd);
       const parts = (args ?? "").trim().split(/\s+/);
       const sub = parts[0] ?? "";
       if (sub === "model") {
@@ -390,6 +403,8 @@ export default function persistentSubagents(pi: ExtensionAPI): void {
   });
 
   pi.on("session_start", async (_event, ctx) => {
+    const svc = getServices(ctx.cwd);
+    svc.rootApi = pi;
     svc.rootSessionFile = ctx.sessionManager.getSessionFile() ?? undefined;
     if (svc.started) return;
     svc.started = true;
@@ -410,8 +425,8 @@ export default function persistentSubagents(pi: ExtensionAPI): void {
   });
 
   // Retry any callbacks that arrived while the root session was not attached.
-  pi.on("agent_settled", async () => {
-    await svc.router.flushOutbox();
+  pi.on("agent_settled", async (_event, ctx) => {
+    await getServices(ctx.cwd).router.flushOutbox();
   });
 }
 
