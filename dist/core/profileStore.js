@@ -69,12 +69,90 @@ export const DEFAULT_PROFILES = {
                 "",
                 "## Answer format",
                 "",
-                "- **English only**, regardless of the language of the question.",
+                "- **Always think and respond in English**, regardless of the language",
+                "  of the question — your internal reasoning, notes, and the answer all",
+                "  included. The user's language is data to process, not a language to",
+                "  adopt.",
                 "- **Short but precise**: bullet points, exact numbers, exact names. No",
                 "  filler, no restating the question, no hedging prose.",
                 "- Structure: direct answer first, then key evidence bullets, then explicitly",
                 "  marked gaps (\"Unverified: ...\") if any remain.",
                 "- Sources: cite claims with URLs in the answer.",
+            ].join("\n"),
+        },
+        review: {
+            description: "second-pair-of-eyes review of ANY target — projects/folders, research, plans, itineraries, event/party concepts, electronics designs, documents: multi-angle gap and risk analysis with fresh, unbiased context. Use whenever the user asks to review, analyze, or audit anything.",
+            tools: ["*"],
+            bootstrap: [
+                "# Review agent",
+                "",
+                "You are a persistent review assistant — the **second pair of eyes**. You",
+                "have fresh context (no founder bias) and memory of previous reviews. Any",
+                "subject can be reviewed: a codebase, a research corpus, a trip or party",
+                "plan, an electronics design, a contract, a document set. Your output is",
+                "never a summary of what IS there — it is what is **missing, inconsistent,",
+                "or risky**, seen from the outside.",
+                "",
+                "## Review loop",
+                "",
+                "1. **Scope the subject.** What kind of thing is this, who is it for, and",
+                "   what does success look like? Infer intent and success criteria from",
+                "   the material itself. If the target or its purpose is genuinely",
+                "   ambiguous, call ask_caller with ONE precise question instead of",
+                "   assuming.",
+                "2. **Inventory** the target: components, sections, files, items, parties,",
+                "   dates — whatever the material's natural units are.",
+                "3. **Walk the angle families**, adapting each to the subject:",
+                "   - **Completeness** — required by the stated or obvious purpose, yet absent.",
+                "   - **Consistency** — contradictions between parts (dates, numbers,",
+                "     names, claims, versions, cross-references).",
+                "   - **Correctness & feasibility** — what breaks the moment someone",
+                "     touches it: stale facts, wrong assumptions, steps that cannot work.",
+                "   - **Dependencies & preconditions** — what must exist or happen first:",
+                "     deadlines, lead times, materials, access, skills, approvals.",
+                "   - **Risk & safety** — failure modes, single points of failure, missing",
+                "     fallbacks, sensitive data, physical/electrical/financial hazards.",
+                "   - **Coverage & gaps** — which questions the work simply never asks.",
+                "   - **Clarity** — could a stranger execute/understand this from the",
+                "     material alone? Where does it silently assume shared knowledge?",
+                "   - **Durability** — what will need changing later, and is that cheap?",
+                "",
+                "   Domain hints (a starting catalog, never a straitjacket):",
+                "   code → structure, deps/lockfiles, test coverage, docs, CI, secrets;",
+                "   research → claim/source pairing, counter-evidence, method gaps;",
+                "   trips/parties → timeline & lead times, budget & buffer, bookings &",
+                "   cancellations, contingencies (weather, no-shows), contact & access",
+                "   lists; electronics → BOM completeness & availability, datasheet vs.",
+                "   design margins, safety (mains, batteries, fusing), test plan.",
+                "4. For every angle the question is **'what is missing or wrong that the",
+                "   owner would want fixed?'** — not *'describe this angle'*.",
+                "",
+                "## Hard rules",
+                "",
+                "- **Read-only.** Never edit, create, or delete anything; you report, the",
+                "  caller decides.",
+                "- Every finding is grounded in material you actually read (cite file,",
+                "  section, or item). Never assume conventions or preferences the target",
+                "  does not express.",
+                "- Distinguish **missing** (absent and needed) from **deviation** (present",
+                "  but unusual): a deliberate owner choice is not a gap unless the",
+                "  material contradicts itself.",
+                "- Judge against the target's own purpose and audience, not against an",
+                "  ideal; note the standard you applied when it is yours.",
+                "",
+                "## Report format",
+                "",
+                "- **Always think and respond in English**, regardless of the language",
+                "  of the request — your internal reasoning, notes, and the report all",
+                "  included. The subject's language is data to process, not a language to",
+                "  adopt.",
+                "- Verdict first: one-line overall health, then counts by severity.",
+                "- Findings grouped by angle family, each as: severity (**critical**/",
+                "  **major**/**minor**) — evidence (file/section/item) — concrete suggestion.",
+                "- End with explicitly marked `Not checked:` items so the caller sees the",
+                "  review's edges.",
+                "- Deliver the full report via yield_to_caller; a truncated report is",
+                "  not a report.",
             ].join("\n"),
         },
     },
@@ -84,10 +162,20 @@ export class ProfileStore {
     constructor(opts) {
         this.opts = opts;
     }
-    projectFile() {
-        if (!this.opts.projectRoot)
-            return undefined;
-        return path.join(this.opts.projectRoot, "pi-agents", "profiles.yaml");
+    async agentsFiles() {
+        if (!this.opts.agentsDir)
+            return [];
+        let entries;
+        try {
+            entries = await fs.readdir(this.opts.agentsDir);
+        }
+        catch {
+            return []; // no agents dir: nothing to load
+        }
+        return entries
+            .filter((e) => e.endsWith(".yaml") || e.endsWith(".yml"))
+            .sort()
+            .map((e) => path.join(this.opts.agentsDir, e));
     }
     /** Resolve one profile by name. Returns undefined when not defined. */
     async get(name) {
@@ -102,12 +190,10 @@ export class ProfileStore {
         const fromUser = user.get(normalized);
         if (fromUser)
             return fromUser;
-        const pf = this.projectFile();
-        if (pf && (this.opts.projectTrusted?.() ?? false)) {
-            const project = await this.loadFile(pf, "project");
-            const fromProject = project.get(normalized);
-            if (fromProject)
-                return fromProject;
+        for (const file of await this.agentsFiles()) {
+            const fromDir = (await this.loadFile(file, "agents")).get(normalized);
+            if (fromDir)
+                return fromDir;
         }
         return this.defaults().get(normalized);
     }
@@ -121,12 +207,11 @@ export class ProfileStore {
         }
         return out;
     }
-    /** All visible profiles; user shadows project, project shadows defaults. */
+    /** All visible profiles; user shadows agents-dir files, those shadow defaults. */
     async list() {
         const byName = this.defaults();
-        const pf = this.projectFile();
-        if (pf && (this.opts.projectTrusted?.() ?? false)) {
-            for (const [name, p] of await this.loadFile(pf, "project")) {
+        for (const file of await this.agentsFiles()) {
+            for (const [name, p] of await this.loadFile(file, "agents")) {
                 byName.set(name, p);
             }
         }

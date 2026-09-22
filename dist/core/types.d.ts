@@ -94,7 +94,7 @@ export interface AgentProfile {
      */
     tools: string[];
     /** Origin of the definition, for trust decisions. */
-    source: "user" | "project" | "default";
+    source: "user" | "agents" | "default";
 }
 /** Input to the delegate tool. */
 export interface DelegateRequest {

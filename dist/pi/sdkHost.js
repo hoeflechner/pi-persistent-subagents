@@ -1,4 +1,5 @@
 import { createAgentSession, ModelRuntime, resolveModelScopeWithDiagnostics, SessionManager, } from "@earendil-works/pi-coding-agent";
+import { basename } from "node:path";
 import { Type } from "typebox";
 /**
  * Real SessionHost backed by the Pi SDK (ADR-0001, verified against
@@ -22,7 +23,15 @@ export function renderEnvelope(call, bootstrap) {
         `yield_to_caller with the complete result. That call is your answer. ` +
         `If you are missing information only the caller or the user can provide, ` +
         `call ask_caller with your question instead of guessing — the answer ` +
-        `arrives as a follow-up message in this session.`;
+        `arrives as a follow-up message in this session. yield_to_caller and ` +
+        `ask_caller are DELIVERY PROTOCOL steps, not task tools: call one of them ` +
+        `even if the task text below restricts or forbids using tools — only these ` +
+        `calls deliver your result. Never end a delegated turn without one: text ` +
+        `you write outside the tool call is lost and the caller never receives it; ` +
+        `pass the COMPLETE result, not a summary of what you will do next. If the ` +
+        `two tools are genuinely not among your available tools, you are being read ` +
+        `interactively — answer as a normal final message and do not call tools ` +
+        `that do not exist.`;
     const parts = [];
     if (bootstrap)
         parts.push(bootstrap.trim());
@@ -48,6 +57,18 @@ export class PiSdkSessionHost {
     runtimePromise;
     /** Live managed sessions by session key, for callback delivery. */
     liveSessions = new Map();
+    /** Pi session id -> per-session yield/ask holder. Armed only while a
+     * runTurn awaits the result; the globally registered protocol tools look
+     * holders up here, so delegated runs consume them and interactive drives
+     * (same transcript, UI runtime) fall into the guard branch. */
+    holdersBySessionId = new Map();
+    protocolYield = makeYieldTool((id) => this.holdersBySessionId.get(id));
+    protocolAsk = makeAskTool((id) => this.holdersBySessionId.get(id));
+    /** Holder registered for a live Pi session id (cross-runtime lookup for the
+     * extension-registered protocol tools; armed state decides consumption). */
+    peekHolder(sessionId) {
+        return this.holdersBySessionId.get(sessionId);
+    }
     constructor(opts) {
         this.opts = opts;
     }
@@ -79,11 +100,12 @@ export class PiSdkSessionHost {
                     ],
                 }),
             customTools: [
-                makeYieldTool(holder),
-                makeAskTool(holder),
+                this.protocolYield,
+                this.protocolAsk,
                 ...(this.opts.buildExtraTools?.(placeholderRecord(spec)) ?? []),
             ],
         });
+        this.holdersBySessionId.set(session.sessionId, holder);
         const record = {
             schemaVersion: 1,
             sessionKey: spec.sessionKey,
@@ -99,6 +121,10 @@ export class PiSdkSessionHost {
         if (!record.sessionPath) {
             throw new Error("Pi session file unavailable immediately after creation");
         }
+        // Human-identifiable in /resume and host UI session lists: '<agent> <project>'.
+        // Managed sessions are project-scoped, so the basename disambiguates the
+        // same agent across projects; the pi session name is the only handle UIs show.
+        session.setSessionName(`${spec.displayName} ${basename(this.opts.cwd)}`);
         const managed = new PiSdkSession(record, session, spec.profile.instructions, holder);
         this.liveSessions.set(record.sessionKey, managed);
         return managed;
@@ -126,13 +152,18 @@ export class PiSdkSessionHost {
                     ],
                 }),
             customTools: [
-                makeYieldTool(holder),
-                makeAskTool(holder),
+                this.protocolYield,
+                this.protocolAsk,
                 ...(this.opts.buildExtraTools?.(record) ?? []),
             ],
         });
+        this.holdersBySessionId.set(session.sessionId, holder);
         // An opened session already has its transcript; bootstrap is not re-sent
         // (architecture.md §11.1). Drift is surfaced by inspect/doctor instead.
+        // Retro-name sessions created before session naming existed.
+        if (!sessionManager.getSessionName()) {
+            session.setSessionName(`${record.displayName ?? record.agentName} ${basename(this.opts.cwd)}`);
+        }
         const managed = new PiSdkSession(record, session, "", holder);
         this.liveSessions.set(record.sessionKey, managed);
         return managed;
@@ -141,6 +172,7 @@ export class PiSdkSessionHost {
         const s = this.expect(managed);
         s.yieldHolder.content = undefined;
         s.yieldHolder.question = undefined;
+        s.yieldHolder.armed = true;
         this.opts.onDispatch?.(s.session.sessionId, {
             sessionKey: call.targetSessionKey,
             ancestry: call.ancestry,
@@ -153,6 +185,7 @@ export class PiSdkSessionHost {
             await s.session.prompt(envelope);
         }
         catch (err) {
+            s.yieldHolder.armed = false;
             return {
                 callId: call.callId,
                 sourceSessionKey: call.targetSessionKey,
@@ -161,6 +194,9 @@ export class PiSdkSessionHost {
                 error: err.message,
             };
         }
+        // The turn is over: no later yield/ask (e.g. the same transcript driven
+        // from a UI) may consume this run's holder.
+        s.yieldHolder.armed = false;
         if (s.yieldHolder.question !== undefined) {
             return {
                 callId: call.callId,
@@ -204,6 +240,7 @@ export class PiSdkSessionHost {
     async close(managed) {
         const s = this.expect(managed);
         this.liveSessions.delete(s.record.sessionKey);
+        this.holdersBySessionId.delete(s.session.sessionId);
         s.session.dispose();
     }
     expect(managed) {
@@ -229,24 +266,44 @@ export class PiSdkSessionHost {
         return scopedModels[0]?.model;
     }
 }
-/** The yield_to_caller tool: captures the answer and ends the run. */
-export function makeYieldTool(holder) {
+/** The yield_to_caller tool: captures the answer and ends the run. Registered
+ * globally by the extension, so it exists in every runtime; only ARMED holders
+ * (a delegated turn awaiting its result) consume it — everything else gets
+ * guidance instead of a silent failure. */
+export function makeYieldTool(resolve) {
     return {
         name: YIELD_TOOL_NAME,
         label: "Yield answer",
         description: "Return your complete answer to the session that delegated this task to " +
-            "you. Call this exactly once, as your final action. The text you pass " +
-            "becomes your entire answer, so include everything the caller needs.",
-        promptSnippet: "Call yield_to_caller(answer) as your final action to return results to the caller.",
+            "you. For a delegated run, call this exactly once, as your final action: " +
+            "the text you pass becomes your entire answer, so include everything the " +
+            "caller needs. Outside a delegated run this tool has no caller — reply " +
+            "with a normal message instead.",
+        promptSnippet: "yield_to_caller(answer) returns results to a delegating caller — delegated runs only.",
         promptGuidelines: [
-            "yield_to_caller is your answer channel: pass the complete result, not a summary of what you will do next.",
-            "Always finish by calling yield_to_caller with your complete answer. Never end a turn without it — text you write without the tool call is lost and the caller never receives it.",
+            "yield_to_caller matters only during a delegated run (a task envelope named the caller); interactive sessions answer in plain final text.",
         ],
         parameters: Type.Object({
             answer: Type.String({ description: "The complete answer for the caller." }),
         }),
-        // eslint-disable-next-line @typescript-eslint/require-await
-        execute: async (_id, params) => {
+        execute: async (_id, params, _signal, _onUpdate, ctx) => {
+            const holder = ctx?.sessionManager?.getSessionId
+                ? resolve(ctx.sessionManager.getSessionId())
+                : undefined;
+            if (!holder?.armed) {
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: "No delegated run is awaiting this session right now — you are " +
+                                "being read directly. Put your answer in a normal final message; " +
+                                "do not call this tool again this turn.",
+                        },
+                    ],
+                    details: undefined,
+                };
+            }
+            holder.armed = false;
             holder.content = params.answer;
             return {
                 content: [{ type: "text", text: "Answer delivered to caller. You may stop." }],
@@ -256,27 +313,45 @@ export function makeYieldTool(holder) {
         },
     };
 }
-/** The ask_caller tool: captures a question for the caller and ends the run. */
-export function makeAskTool(holder) {
+/** The ask_caller tool: captures a question for the caller and ends the run.
+ * Global registration and armed-holder semantics as in makeYieldTool. */
+export function makeAskTool(resolve) {
     return {
         name: ASK_TOOL_NAME,
         label: "Ask caller",
         description: "Ask the session that delegated this task a question you cannot answer " +
-            "without the caller or the user. Call this instead of guessing or " +
-            "yielding an incomplete answer. The answer arrives as a follow-up " +
-            "message in this same session, where you keep all your context.",
-        promptSnippet: "Call ask_caller(question) when only the caller or user can supply missing information.",
+            "without the caller or the user. In a delegated run, call this instead of " +
+            "guessing or yielding an incomplete answer; the answer arrives as a " +
+            "follow-up message in this same session, where you keep all your context. " +
+            "Outside a delegated run, just ask in a normal message.",
+        promptSnippet: "ask_caller(question) asks a delegating caller — delegated runs only.",
         promptGuidelines: [
-            "Never estimate or invent information only the caller/user could provide — call ask_caller instead.",
-            "ask_caller ends your turn; do not also call yield_to_caller in the same turn. Make the question complete and self-contained: the caller does not see your context.",
+            "ask_caller matters only during a delegated run; never estimate what the caller/user could provide there — ask instead.",
+            "ask_caller ends a delegated turn; do not also call yield_to_caller in the same turn. Make the question complete and self-contained: the caller does not see your context.",
         ],
         parameters: Type.Object({
             question: Type.String({
                 description: "The question for the caller (or, via the caller, the user).",
             }),
         }),
-        // eslint-disable-next-line @typescript-eslint/require-await
-        execute: async (_id, params) => {
+        execute: async (_id, params, _signal, _onUpdate, ctx) => {
+            const holder = ctx?.sessionManager?.getSessionId
+                ? resolve(ctx.sessionManager.getSessionId())
+                : undefined;
+            if (!holder?.armed) {
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: "No delegated run is awaiting this session right now — you are " +
+                                "being read directly. Ask your question in a normal final " +
+                                "message; do not call this tool again this turn.",
+                        },
+                    ],
+                    details: undefined,
+                };
+            }
+            holder.armed = false;
             holder.question = params.question;
             return {
                 content: [

@@ -136,10 +136,21 @@ export class DelegationRouter {
     }
     /** Deliver every settled-but-undelivered callback (startup + retries).
      * Confirms previously-queued deliveries first so retries do not duplicate. */
-    async flushOutbox() {
+    /** Flush pending callbacks. When opts.rootSessionId is given, callbacks
+     * addressed to a ROOT caller are attempted only if the addressee matches
+     * that session id exactly — a runtime may never deliver (and self-confirm
+     * via confirm()) callbacks addressed to another session. Managed-caller
+     * callbacks are always attempted: the deliverer resolves them against its
+     * own host live-sessions and declines when the target is absent. */
+    async flushOutbox(opts) {
         const pending = await this.deps.calls.pendingCallbacks();
         let delivered = 0;
         for (const call of pending) {
+            if (opts !== undefined &&
+                call.caller.kind === "root" &&
+                call.caller.sessionId !== opts.rootSessionId) {
+                continue; // addressed elsewhere: this runtime cannot deliver it
+            }
             if (this.deps.deliverer.confirm) {
                 const confirmed = await this.deps.deliverer
                     .confirm(call.callId, call.caller)
@@ -159,10 +170,11 @@ export class DelegationRouter {
         }
         return delivered;
     }
-    /** Startup: recover interrupted calls, then flush their callbacks. */
-    async reconcile() {
+    /** Startup: recover interrupted calls, then flush callbacks addressed to
+     * the starting session (scoped like flushOutbox). */
+    async reconcile(opts) {
         const recovered = await this.deps.calls.recoverInterrupted();
-        const delivered = await this.flushOutbox();
+        const delivered = await this.flushOutbox(opts);
         return { recovered: recovered.length, delivered };
     }
     async ensureSession(profile, sessionKey, callerModelId) {

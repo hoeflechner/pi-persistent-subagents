@@ -40,30 +40,63 @@ describe("envelope rendering", () => {
 });
 
 describe("yield_to_caller tool", () => {
-  it("captures the answer and terminates the run", async () => {
-    const holder: { content?: string | undefined } = {};
-    const tool = makeYieldTool(holder);
+  it("captures the answer and terminates the run when armed", async () => {
+    const holder: { content?: string | undefined; armed?: boolean } = { armed: true };
+    const tool = makeYieldTool((id) => (id === "s1" ? holder : undefined));
     // The host wires execute() with validated params; call it directly.
     const execute = tool.execute as unknown as (
       id: string,
       params: { answer: string },
+      signal: unknown,
+      onUpdate: unknown,
+      ctx: unknown,
     ) => Promise<{ content: Array<{ type: string; text: string }>; terminate?: boolean }>;
-    const result = await execute("tc1", { answer: "A wins on latency" });
+    const result = await execute("tc1", { answer: "A wins on latency" }, undefined, undefined, {
+      sessionManager: { getSessionId: () => "s1" },
+    });
     expect(holder.content).toBe("A wins on latency");
+    expect(holder.armed).toBe(false); // consumed — no double delivery
     expect(result.terminate).toBe(true);
     expect(result.content[0]?.text).toContain("Answer delivered");
+  });
+
+  it("guards instead of failing when no delegated run awaits (interactive UI)", async () => {
+    const armed: { content?: string | undefined; armed?: boolean } = { armed: false };
+    const tool = makeYieldTool((id) => (id === "known" ? armed : undefined));
+    const execute = tool.execute as unknown as (
+      id: string,
+      params: { answer: string },
+      signal: unknown,
+      onUpdate: unknown,
+      ctx: unknown,
+    ) => Promise<{ content: Array<{ type: string; text: string }>; terminate?: boolean }>;
+    for (const sessionId of ["known", "unknown"]) {
+      const result = await execute("tc1", { answer: "x" }, undefined, undefined, {
+        sessionManager: { getSessionId: () => sessionId },
+      });
+      expect(armed.content).toBeUndefined(); // unarmed holder is never written
+      expect(result.terminate).toBeUndefined(); // interactive turn continues
+      expect(result.content[0]?.text).toContain("being read directly");
+    }
   });
 });
 
 describe("ask_caller tool", () => {
-  it("captures the question and terminates the run", async () => {
-    const holder: { content?: string | undefined; question?: string | undefined } = {};
-    const tool = makeAskTool(holder);
+  it("captures the question and terminates the run when armed", async () => {
+    const holder: { content?: string | undefined; question?: string | undefined; armed?: boolean } = {
+      armed: true,
+    };
+    const tool = makeAskTool((id) => (id === "s1" ? holder : undefined));
     const execute = tool.execute as unknown as (
       id: string,
       params: { question: string },
+      signal: unknown,
+      onUpdate: unknown,
+      ctx: unknown,
     ) => Promise<{ content: Array<{ type: string; text: string }>; terminate?: boolean }>;
-    const result = await execute("tc1", { question: "Which variant?" });
+    const result = await execute("tc1", { question: "Which variant?" }, undefined, undefined, {
+      sessionManager: { getSessionId: () => "s1" },
+    });
     expect(holder.question).toBe("Which variant?");
     expect(holder.content).toBeUndefined();
     expect(result.terminate).toBe(true);

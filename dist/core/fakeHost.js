@@ -21,9 +21,12 @@ export class FakeSessionHost {
         outcome: "completed",
         content: `result for ${call.targetAgent}: ${call.prompt.slice(0, 40)}`,
     });
-    /** Test hook: block runTurn until releaseTurn() is called. */
+    /** Test hook: block runTurn until releaseTurn() is called. A release that
+     * arrives before a gated turn registers its resolver is LATCHED and consumed
+     * by the next gated turn — never dropped. */
     gateTurns = false;
     releaseFns = [];
+    pendingRelease = false;
     async open(record) {
         this.opened.push(record.sessionKey);
         return { record };
@@ -56,7 +59,10 @@ export class FakeSessionHost {
         this.prompts.push(call);
         try {
             if (this.gateTurns) {
-                await new Promise((resolve) => this.releaseFns.push(resolve));
+                if (this.pendingRelease)
+                    this.pendingRelease = false;
+                else
+                    await new Promise((resolve) => this.releaseFns.push(resolve));
             }
             return this.turnResolver(call);
         }
@@ -75,7 +81,10 @@ export class FakeSessionHost {
     }
     releaseTurn() {
         const fn = this.releaseFns.shift();
-        fn?.();
+        if (fn)
+            fn();
+        else
+            this.pendingRelease = true; // latch: no gated turn registered yet
     }
 }
 //# sourceMappingURL=fakeHost.js.map

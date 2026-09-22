@@ -16,7 +16,7 @@ import { ProfileStore } from "./core/profileStore.js";
 import { SessionRegistry } from "./core/registry.js";
 import { DelegationRouter, renderCallback, type CallbackDeliverer } from "./core/router.js";
 import type { CallerAddress } from "./core/types.js";
-import { PiSdkSessionHost } from "./pi/sdkHost.js";
+import { makeAskTool, makeYieldTool, PiSdkSessionHost } from "./pi/sdkHost.js";
 
 /**
  * Pi extension entry point (architecture.md §5, §8-§10).
@@ -40,10 +40,13 @@ interface Services {
   mailboxes: MailboxRegistry;
   host: PiSdkSessionHost;
   router: DelegationRouter;
-  /** Root-session API, set when the extension loads in the interactive session. */
-  rootApi: ExtensionAPI | undefined;
-  /** Exact transcript file of the current root session, for delivery confirm. */
-  rootSessionFile: string | undefined;
+  /** Root sessions live in THIS process, keyed by exact Pi session id.
+   * Root callbacks route strictly by caller.sessionId — never "whoever
+   * registered last": a single shared slot let a session that started later
+   * (e.g. a managed child opened in a UI) steal callbacks addressed to its
+   * caller and self-confirm delivery into its own transcript (observed
+   * 2026-09-22, pi-web daemon). */
+  liveRoots: Map<string, { api: ExtensionAPI; sessionFile: string | undefined }>;
   /** Caller identity per live session id, recorded when the router dispatches. */
   callerContext: Map<
     string,
@@ -51,7 +54,6 @@ interface Services {
   >;
   /** callId -> last send attempt; blocks re-queue until confirm() or cooldown. */
   inFlight: Map<string, number>;
-  started: boolean;
 }
 
 /** Re-send an unconfirmed callback only after this long (visible duplicate is
@@ -79,8 +81,12 @@ function getServices(cwd: string): Services {
   const projectId = canonicalProjectId(key);
   const profiles = new ProfileStore({
     userProfilesFile: path.join(stateDir, "profiles.yaml"),
-    projectRoot: key,
-    projectTrusted: () => true, // refined by the project_trust hook below
+    // User-owned profile directory (NOT the project): a cloned repository can
+    // never define or rewrite an agent persona. Override with
+    // PI_SUBAGENTS_AGENTS_DIR.
+    agentsDir:
+      process.env.PI_SUBAGENTS_AGENTS_DIR ??
+      path.join(path.dirname(getAgentDir()), "agents"),
   });
   const registry = new SessionRegistry(stateDir);
   const calls = new CallStore(stateDir);
@@ -98,8 +104,9 @@ function getServices(cwd: string): Services {
       }
       svc.inFlight.set(callId, Date.now());
       if (caller.kind === "root") {
-        if (!svc.rootApi) return false; // root not attached yet: retry later
-        svc.rootApi.sendMessage(
+        const target = svc.liveRoots.get(caller.sessionId);
+        if (!target) return false; // caller not live in this process: stays pending
+        target.api.sendMessage(
           {
             customType: CALLBACK_TYPE,
             content: message,
@@ -124,9 +131,23 @@ function getServices(cwd: string): Services {
       try {
         const raw = await fs.readFile(file, "utf8");
         // The receipt tool result also mentions the callId and the literal
-        // "delegation_result", so require the persisted custom-message entry
-        // marker plus the callId to avoid false-positive confirmation.
-        const found = raw.includes(`"customType":"${CALLBACK_TYPE}"`) && raw.includes(callId);
+        // "delegation_result", so a file-global includes() check false-positives
+        // as soon as a session has *any* delivered callback (marker) plus any
+        // queued call (receipt callId). Require BOTH within the SAME persisted
+        // custom_message entry — the actual durable artifact of a delivery.
+        const found = raw.split("\n").some((line) => {
+          if (!line.includes(callId) || !line.includes(CALLBACK_TYPE)) return false;
+          try {
+            const e = JSON.parse(line);
+            return (
+              e?.type === "custom_message" &&
+              e?.customType === CALLBACK_TYPE &&
+              JSON.stringify(e).includes(callId)
+            );
+          } catch {
+            return false;
+          }
+        });
         if (found) svc.inFlight.delete(callId);
         return found;
       } catch {
@@ -161,11 +182,9 @@ function getServices(cwd: string): Services {
   svc.mailboxes = mailboxes;
   svc.host = host;
   svc.router = router;
-  svc.rootApi = undefined;
-  svc.rootSessionFile = undefined;
+  svc.liveRoots = new Map();
   svc.callerContext = new Map();
   svc.inFlight = new Map();
-  svc.started = false;
   servicesByCwd.set(key, svc);
   return svc;
 }
@@ -175,7 +194,9 @@ async function transcriptFor(
   svc: Services,
   caller: CallerAddress,
 ): Promise<string | undefined> {
-  if (caller.kind === "root") return svc.rootSessionFile;
+  if (caller.kind === "root") {
+    return svc.liveRoots.get(caller.sessionId)?.sessionFile;
+  }
   const live = caller.sessionKey ? svc.host.liveSessions.get(caller.sessionKey) : undefined;
   if (live?.record.sessionPath) return live.record.sessionPath;
   const record = caller.sessionKey ? await svc.registry.get(caller.sessionKey) : undefined;
@@ -191,7 +212,10 @@ function makeDelegateTool(): ToolDefinition {
     description:
       "Fire-and-forget delegation to a persistent named agent session. Use for " +
       "web research beyond a single known-URL fetch (multi-source research, " +
-      "comparisons, verification) and other deep background work. Returns a " +
+      "comparisons, verification), second-pair-of-eyes review/analysis of any " +
+      "target (projects and folders, but also research, plans, event concepts, " +
+      "designs, documents), and " +
+      "other deep background work. Returns a " +
       "receipt immediately; the agent's answer arrives later as a " +
       "delegation_result message. Use list_agents to see available agents.",
     promptSnippet:
@@ -201,13 +225,20 @@ function makeDelegateTool(): ToolDefinition {
       "When a delegation_result message arrives, treat it as the agent's full answer and continue your task with it.",
       "When a delegation_question message arrives, the agent is blocked waiting: answer it yourself if you can, otherwise ask the user, then reply by delegating to the same agent again (the agent continues in its same session with full context).",
       "Delegate web research to the 'research' agent: anything beyond a single known-URL fetch belongs there — multi-source research, comparisons, fact verification, version/API lookups, or any question needing several searches/reads to answer fully.",
+      "Delegate EVERY user request to review, analyze, or audit SOMETHING — a project, folder, or codebase, but equally research, plans, itineraries, event/party concepts, designs, or documents — to the 'review' agent: it is the fresh-context second pair of eyes, always delegate rather than reviewing inline; pass the target (path, file, or subject description) and any focus the user mentioned. The review agent keeps memory of previous reviews.",
       "Do not do multi-step web research yourself; use your own web tools only for one quick fetch of a URL you already know.",
       "Delegate deep codebase investigations and other long-running background work too — the agent keeps memory across calls, so repeated tasks on the same topic get cheaper.",
       "Make each delegated prompt self-contained: the agent only sees this prompt plus its own past sessions, never this conversation.",
+      "The delegated prompt must contain the TASK ONLY: never forbid or restrict tool use (e.g. 'do not use tools') — the agent delivers its result via the yield_to_caller tool call, so tool restrictions in the prompt collide with the delivery protocol and degrade delivery to a fallback. Keep output-length/format wishes in the prompt; keep tool policy out of it.",
+      "Write delegated prompts in English regardless of the language the user is speaking — managed agents think and respond in English by design; translating the task into the agent's working language is part of preparing a self-contained prompt.",
     ],
     parameters: Type.Object({
       agent: Type.String({ description: "Agent profile name, e.g. 'research'." }),
-      prompt: Type.String({ description: "The complete task for the agent." }),
+      prompt: Type.String({
+        description:
+          "The complete task for the agent. Task content only — do not forbid or " +
+          "restrict tool use; the agent must call yield_to_caller (a tool) to deliver.",
+      }),
     }),
     execute: async (_id, params, _signal, _onUpdate, ctx) => {
       const svc = getServices(ctx.cwd);
@@ -257,6 +288,21 @@ export default function persistentSubagents(pi: ExtensionAPI): void {
   // NOTE: never bind services to process.cwd() here — the host process cwd
   // (e.g. /app in a Docker daemon) is not the session cwd. Everything is
   // resolved from ctx.cwd at use time.
+  // Protocol tools are registered GLOBALLY (single source; the SDK host no
+  // longer injects its own copies) so they exist in every runtime the
+  // extension loads into — including a managed transcript opened in a UI.
+  // Consumption is holder-armed: only a delegated run awaiting its result
+  // consumes the call; anything else gets an interactive-guidance result.
+  const resolveHolder = (sessionId: string) => {
+    for (const s of servicesByCwd.values()) {
+      const holder = s.host.peekHolder(sessionId);
+      if (holder) return holder;
+    }
+    return undefined;
+  };
+  pi.registerTool(makeYieldTool(resolveHolder));
+  pi.registerTool(makeAskTool(resolveHolder));
+
   pi.registerTool(makeDelegateTool());
   pi.registerTool(makeListAgentsTool());
 
@@ -404,11 +450,16 @@ export default function persistentSubagents(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_event, ctx) => {
     const svc = getServices(ctx.cwd);
-    svc.rootApi = pi;
-    svc.rootSessionFile = ctx.sessionManager.getSessionFile() ?? undefined;
-    if (svc.started) return;
-    svc.started = true;
-    const { recovered, delivered } = await svc.router.reconcile();
+    const sessionId = ctx.sessionManager.getSessionId();
+    svc.liveRoots.set(sessionId, {
+      api: pi,
+      sessionFile: ctx.sessionManager.getSessionFile() ?? undefined,
+    });
+    // Recover interrupted calls, then flush ONLY callbacks addressed to
+    // THIS session (plus managed ones) — never everybody's pending at once.
+    const { recovered, delivered } = await svc.router.reconcile({
+      rootSessionId: sessionId,
+    });
     if (recovered || delivered) {
       pi.sendMessage(
         {
@@ -424,9 +475,20 @@ export default function persistentSubagents(pi: ExtensionAPI): void {
     }
   });
 
-  // Retry any callbacks that arrived while the root session was not attached.
+  // Drop the live handle on shutdown so callbacks addressed to this session
+  // stay pending (redriven at its next start) instead of being injected into
+  // a dead runtime.
+  pi.on("session_shutdown", async (_event, ctx) => {
+    getServices(ctx.cwd).liveRoots.delete(ctx.sessionManager.getSessionId());
+  });
+
+  // Retry callbacks that arrived while the addressee was not attached. Scoped
+  // to the settling session: whichever runtime settles next must NOT deliver
+  // (and self-confirm) callbacks addressed to someone else.
   pi.on("agent_settled", async (_event, ctx) => {
-    await getServices(ctx.cwd).router.flushOutbox();
+    await getServices(ctx.cwd).router.flushOutbox({
+      rootSessionId: ctx.sessionManager.getSessionId(),
+    });
   });
 }
 

@@ -2,14 +2,16 @@ import type { AgentProfile } from "./types.js";
 /**
  * YAML agent profiles (architecture.md §11).
  *
- * One YAML file per scope holds all profiles of that scope:
- *   <stateDir>/profiles.yaml               user scope   (always trusted)
- *   <projectRoot>/pi-agents/profiles.yaml  project scope (additive, untrusted
- *                                          until the project is trusted)
+ * Profile sources — a project directory is NEVER one (a cloned repo must not
+ * be able to rewrite agent personas):
+ *   <stateDir>/profiles.yaml                 user scope (set()/`/subagents` writes here)
+ *   ~/.pi/agents/*.yaml                      agents-dir scope (user-owned files,
+ *                                            sorted merge; PI_SUBAGENTS_AGENTS_DIR)
+ *   DEFAULT_PROFILES (this module)           built-in defaults
  *
- * Precedence: user > project > built-in defaults (DEFAULT_PROFILES below).
- * Defaults give a fresh install a working `research` agent; any scope can
- * shadow a default by defining the same name.
+ * Precedence: user > agents-dir files > built-in defaults. Defaults give a
+ * fresh install working `research`/`review` agents; any scope can shadow a
+ * default by defining the same name.
  *
  * Format:
  *   profiles:
@@ -41,20 +43,25 @@ export declare const DEFAULT_PROFILES: ProfilesFile;
 export interface ProfileStoreOptions {
     /** Absolute path to the user-scope YAML file, e.g. <stateDir>/profiles.yaml. */
     userProfilesFile: string;
-    /** Repository root, when a project is open. */
-    projectRoot?: string;
-    /** Whether project-declared profiles are trusted for this project. */
-    projectTrusted?: () => boolean;
+    /**
+     * Directory of user-owned profile files (e.g. ~/.pi/agents). Every *.yaml
+     * / *.yml file uses the same `profiles:` schema as profiles.yaml; files
+     * merge in sorted order, later files shadow earlier ones. This REPLACED
+     * project-scope profiles (pi-agents/profiles.yaml): a project directory is
+     * NEVER a profile source — profile provenance is the user plus built-ins
+     * only (a cloned folder must not be able to rewrite agent personas).
+     */
+    agentsDir?: string;
 }
 export declare class ProfileStore {
     private readonly opts;
     constructor(opts: ProfileStoreOptions);
-    private projectFile;
+    private agentsFiles;
     /** Resolve one profile by name. Returns undefined when not defined. */
     get(name: string): Promise<AgentProfile | undefined>;
     /** Built-in profiles, parsed through the same entry pipeline as files. */
     private defaults;
-    /** All visible profiles; user shadows project, project shadows defaults. */
+    /** All visible profiles; user shadows agents-dir files, those shadow defaults. */
     list(): Promise<AgentProfile[]>;
     /** Create or update a user-scope profile. */
     set(input: {

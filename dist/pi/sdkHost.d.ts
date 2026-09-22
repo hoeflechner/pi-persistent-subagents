@@ -22,6 +22,11 @@ interface YieldHolder {
     content?: string | undefined;
     /** Set when the agent called ask_caller instead of answering. */
     question?: string | undefined;
+    /** Turn-scoped authorization: true only while a delegated run awaits this
+     * holder. The protocol tools consume an armed holder; an unarmed hit means
+     * the session is being driven interactively (UI), where yielding is
+     * meaningless — the tool then answers with guidance instead of terminating. */
+    armed?: boolean;
 }
 export interface SdkHostOptions {
     /** Project working directory for child sessions. */
@@ -69,20 +74,37 @@ export declare class PiSdkSessionHost implements SessionHost {
     private runtimePromise;
     /** Live managed sessions by session key, for callback delivery. */
     readonly liveSessions: Map<string, PiSdkSession>;
+    /** Pi session id -> per-session yield/ask holder. Armed only while a
+     * runTurn awaits the result; the globally registered protocol tools look
+     * holders up here, so delegated runs consume them and interactive drives
+     * (same transcript, UI runtime) fall into the guard branch. */
+    private readonly holdersBySessionId;
+    private readonly protocolYield;
+    private readonly protocolAsk;
+    /** Holder registered for a live Pi session id (cross-runtime lookup for the
+     * extension-registered protocol tools; armed state decides consumption). */
+    peekHolder(sessionId: string): YieldHolder | undefined;
     constructor(opts: SdkHostOptions);
     create(spec: NewSessionSpec): Promise<PiSdkSession>;
     open(record: SessionRecord, profile?: NewSessionSpec["profile"], callerModelId?: string): Promise<PiSdkSession>;
     runTurn(managed: ManagedSession, call: CallRecord): Promise<TurnResult>;
     enqueueFollowUp(managed: ManagedSession, call: CallRecord): Promise<void>;
     abort(managed: ManagedSession, _callId: string): Promise<void>;
-    close(managed: ManagedSession): Promise<void>;
+    close(managed: PiSdkSession): Promise<void>;
     private expect;
     applyModelId(session: ManagedSession, modelId: string): Promise<void>;
     /** Resolve a model pattern (e.g. "claude", "gpt-5.5") against auth/config. */
     resolveModel(pattern: string): Promise<unknown | undefined>;
 }
-/** The yield_to_caller tool: captures the answer and ends the run. */
-export declare function makeYieldTool(holder: YieldHolder): ToolDefinition;
-/** The ask_caller tool: captures a question for the caller and ends the run. */
-export declare function makeAskTool(holder: YieldHolder): ToolDefinition;
+/** Resolve an armed holder for the executing session, or undefined when that
+ * session is not inside an awaited delegated turn (interactive UI drive). */
+export type HolderResolver = (sessionId: string) => YieldHolder | undefined;
+/** The yield_to_caller tool: captures the answer and ends the run. Registered
+ * globally by the extension, so it exists in every runtime; only ARMED holders
+ * (a delegated turn awaiting its result) consume it — everything else gets
+ * guidance instead of a silent failure. */
+export declare function makeYieldTool(resolve: HolderResolver): ToolDefinition;
+/** The ask_caller tool: captures a question for the caller and ends the run.
+ * Global registration and armed-holder semantics as in makeYieldTool. */
+export declare function makeAskTool(resolve: HolderResolver): ToolDefinition;
 export {};

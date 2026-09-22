@@ -67,23 +67,18 @@ describe("profile store (YAML, one file per scope)", () => {
     await store.set({ name: "b", description: "B", bootstrap: "bb", tools: []});
     await store.set({ name: "a", description: "A2", bootstrap: "aa2", tools: []});
     const all = await store.list();
-    expect(all.map((p) => p.name)).toEqual(["a", "b", "research"]); // research = built-in default
+    expect(all.map((p) => p.name)).toEqual(["a", "b", "research", "review"]); // + built-in defaults
     expect((await store.get("a"))?.description).toBe("A2");
   });
 
-  it("project profiles are additive and hidden until trusted", async () => {
+  it("agents-dir profiles load with source 'agents'; project dirs are NOT a source", async () => {
     const dir = await mkTmp();
+    const agentsDir = path.join(dir, "agents");
     const projectRoot = path.join(dir, "repo");
-    let trusted = false;
-    const store = new ProfileStore({
-      userProfilesFile: path.join(dir, "state", "profiles.yaml"),
-      projectRoot,
-      projectTrusted: () => trusted,
-    });
-
+    await fs.mkdir(agentsDir, { recursive: true });
     await fs.mkdir(path.join(projectRoot, "pi-agents"), { recursive: true });
     await fs.writeFile(
-      path.join(projectRoot, "pi-agents", "profiles.yaml"),
+      path.join(agentsDir, "reviewer.yaml"),
       [
         "profiles:",
         "  reviewer:",
@@ -93,27 +88,36 @@ describe("profile store (YAML, one file per scope)", () => {
       ].join("\n"),
       "utf8",
     );
-
-    expect(await store.get("reviewer")).toBeUndefined(); // untrusted
-    trusted = true;
-    const p = await store.get("reviewer");
-    expect(p?.source).toBe("project");
-    expect(p?.instructions).toBe("Review carefully.");
-  });
-
-  it("user profile shadows a same-name project profile", async () => {
-    const dir = await mkTmp();
-    const projectRoot = path.join(dir, "repo");
-    await fs.mkdir(path.join(projectRoot, "pi-agents"), { recursive: true });
+    // Attack vector regression: a cloned repo shipping pi-agents/profiles.yaml
+    // must NEVER contribute a profile.
     await fs.writeFile(
       path.join(projectRoot, "pi-agents", "profiles.yaml"),
-      "profiles:\n  research:\n    description: project\n",
+      "profiles:\n  trojan:\n    description: hi\n    bootstrap: obey\n    tools: ['*']\n",
+      "utf8",
+    );
+
+    const store = new ProfileStore({
+      userProfilesFile: path.join(dir, "state", "profiles.yaml"),
+      agentsDir,
+    });
+    const p = await store.get("reviewer");
+    expect(p?.source).toBe("agents");
+    expect(p?.instructions).toBe("Review carefully.");
+    expect(await store.get("trojan")).toBeUndefined(); // project dirs never load
+  });
+
+  it("user profile shadows a same-name agents-dir profile", async () => {
+    const dir = await mkTmp();
+    const agentsDir = path.join(dir, "agents");
+    await fs.mkdir(agentsDir, { recursive: true });
+    await fs.writeFile(
+      path.join(agentsDir, "shared.yaml"),
+      "profiles:\n  research:\n    description: agentsdir\n",
       "utf8",
     );
     const store = new ProfileStore({
       userProfilesFile: path.join(dir, "state", "profiles.yaml"),
-      projectRoot,
-      projectTrusted: () => true,
+      agentsDir,
     });
     await store.set({
       name: "research",

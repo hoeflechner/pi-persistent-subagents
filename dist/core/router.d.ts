@@ -61,9 +61,20 @@ export declare class DelegationRouter {
     }): Promise<DelegationReceipt>;
     /** Deliver every settled-but-undelivered callback (startup + retries).
      * Confirms previously-queued deliveries first so retries do not duplicate. */
-    flushOutbox(): Promise<number>;
-    /** Startup: recover interrupted calls, then flush their callbacks. */
-    reconcile(): Promise<{
+    /** Flush pending callbacks. When opts.rootSessionId is given, callbacks
+     * addressed to a ROOT caller are attempted only if the addressee matches
+     * that session id exactly — a runtime may never deliver (and self-confirm
+     * via confirm()) callbacks addressed to another session. Managed-caller
+     * callbacks are always attempted: the deliverer resolves them against its
+     * own host live-sessions and declines when the target is absent. */
+    flushOutbox(opts?: {
+        rootSessionId?: string;
+    }): Promise<number>;
+    /** Startup: recover interrupted calls, then flush callbacks addressed to
+     * the starting session (scoped like flushOutbox). */
+    reconcile(opts?: {
+        rootSessionId?: string;
+    }): Promise<{
         recovered: number;
         delivered: number;
     }>;

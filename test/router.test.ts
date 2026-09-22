@@ -89,6 +89,29 @@ describe("delegate router", () => {
     expect(settled?.callbackDeliveredAt).toBeTruthy();
   });
 
+  it("scoped flush never delivers callbacks addressed to another session", async () => {
+    const h = await makeHarness();
+    const callerB = {
+      address: { kind: "root" as const, sessionId: "session-B", label: "b" },
+      ancestry: [],
+      depth: 0,
+    };
+    h.deliverer.reachable = false; // undeliverable while B is not attached
+    const receipt = await h.router.delegate({ agent: "research", prompt: "dig" }, callerB);
+    await h.mailboxes.allIdle();
+    const settled = await h.calls.get(receipt.callId);
+    expect(settled?.status).toBe("settled");
+    expect(settled?.callbackDeliveredAt).toBeFalsy();
+    h.deliverer.reachable = true;
+    // A flush attributed to session-A must not touch B's callback — this is
+    // the self-delivery/self-confirm bug seen live on 2026-09-22.
+    expect(await h.router.flushOutbox({ rootSessionId: "session-A" })).toBe(0);
+    expect(h.deliverer.delivered.length).toBe(0);
+    // The addressee's own flush delivers it.
+    expect(await h.router.flushOutbox({ rootSessionId: "session-B" })).toBe(1);
+    expect(h.deliverer.delivered[0]?.caller.sessionId).toBe("session-B");
+  });
+
   it("ask_caller settles as needs_input and delivers a delegation_question callback", async () => {
     const h = await makeHarness();
     h.host.turnResolver = (call) => ({

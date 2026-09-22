@@ -162,10 +162,11 @@ Write the registry through a temporary file and atomic rename. On startup,
 validate paths and IDs before opening sessions. Missing or corrupt records are
 quarantined rather than silently mapped to a different conversation.
 
-Agent profile definitions may be user-local or project-declared. Project files
-may describe shareable names and policies, but never contain user session IDs,
-session paths, call receipts, or callback state. Project-declared profiles are
-repository-controlled policy and require trust.
+Agent profile definitions are user-local or built-in only — a project
+directory is never a profile source (see §11.2: repository-declared profiles
+were removed as an injection vector). Profile files may describe names and
+policies, but never contain user session IDs, session paths, call receipts, or
+callback state.
 
 ### Durable calls and callback outbox
 
@@ -458,18 +459,22 @@ briefing into a session that already has memories.
 
 ### 11.2 Profile sources and precedence
 
-Precedence: **user > project > built-in defaults**.
+Precedence: **user > agents-dir > built-in defaults**.
 
 - **Built-in defaults (lowest):** profiles shipped in the extension source
-  (`DEFAULT_PROFILES` in `profileStore.ts`), currently `research`. A fresh
-  install can delegate immediately with no setup.
-- **User state dir (default):** `<stateDir>/profiles.yaml`. Always trusted.
-- **Project-declared (additive):** `pi-agents/profiles.yaml` in the
-  repository. A project may add profiles that do not exist in user state.
-  Because these files arrive through the shared checkout, they are untrusted
-  executable policy and activate only after a one-time per-project trust
-  confirmation.
-- A user-state profile with the same name **shadows** a project profile,
+  (`DEFAULT_PROFILES` in `profileStore.ts`), currently `research` and `review`.
+  A fresh install can delegate immediately with no setup.
+- **User state dir (default):** `<stateDir>/profiles.yaml`. Written by
+  `ProfileStore.set()` and the `/subagents` command.
+- **Agents dir (`~/.pi/agents`, override `PI_SUBAGENTS_AGENTS_DIR`):**
+  user-owned profile files; every `*.yaml` / `*.yml` uses the same
+  `profiles:` schema, files merge in sorted order (later shadows earlier).
+- **A project directory is never a profile source.** Repository-declared
+  profiles (`pi-agents/profiles.yaml`) were removed: a cloned folder arriving
+  through a shared checkout could otherwise rewrite persistent agent personas
+  with full tool access, silently, for anyone who merely opens it. Profile
+  provenance is the user and the built-ins — no trust mechanism needed.
+- A user-state profile with the same name **shadows** an agents-dir profile,
   which in turn shadows a built-in default.
 
 ### 11.3 Name addressing

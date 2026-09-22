@@ -17,9 +17,12 @@ export declare class FakeSessionHost implements SessionHost {
     readonly busy: Set<string>;
     /** Test hook: how runTurn resolves. */
     turnResolver: (call: CallRecord) => TurnResult;
-    /** Test hook: block runTurn until releaseTurn() is called. */
+    /** Test hook: block runTurn until releaseTurn() is called. A release that
+     * arrives before a gated turn registers its resolver is LATCHED and consumed
+     * by the next gated turn — never dropped. */
     gateTurns: boolean;
     private releaseFns;
+    private pendingRelease;
     open(record: SessionRecord): Promise<ManagedSession>;
     readonly modelIds: Map<string, string>;
     applyModelId(session: ManagedSession, modelId: string): Promise<void>;
