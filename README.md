@@ -75,6 +75,8 @@ profiles:
     description: condenses long reports into executive summaries
     tools: ["*"]          # capabilities; ["*"] = full tool access
     # model: auto         # "auto" = mirror the delegating session's model
+    guidance:             # optional; rules injected into the CALLER's prompt
+      - Route every "make this concise" request to the 'summarizer' agent.
     bootstrap: |
       # Summarizer
       You take long documents and produce tight executive summaries.
@@ -84,6 +86,17 @@ profiles:
 Precedence: `~/.pi/agent/subagents/profiles.yaml` > `~/.pi/agents/*.yaml` >
 built-ins. **A project directory is never a profile source** — cloning a
 repository cannot rewrite your agents.
+
+### Overriding when agents get delegated to (guidance)
+
+`guidance` is a list of rule lines (or one multiline string) that the
+extension appends to the **hosting agent's** system prompt while the profile
+is visible — this is where the built-in "delegate deep web research to the
+'research' agent…" / "delegate EVERY review request to the 'review'
+agent…" policies live. To change that policy locally, shadow the profile in
+any YAML file (same name) and supply your own `guidance` lines; shadowing
+replaces the profile's guidance wholesale, so resupply the lines you want to
+keep. Changes are re-read on every agent run — no restart needed.
 
 ## Configuration
 

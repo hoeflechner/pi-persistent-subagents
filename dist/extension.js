@@ -6,7 +6,7 @@ import { Type } from "typebox";
 import { canonicalProjectId, buildSessionKey } from "./core/keys.js";
 import { CallStore } from "./core/callStore.js";
 import { MailboxRegistry } from "./core/mailbox.js";
-import { ProfileStore } from "./core/profileStore.js";
+import { ProfileStore, collectProfileGuidance } from "./core/profileStore.js";
 import { SessionRegistry } from "./core/registry.js";
 import { DelegationRouter, renderCallback } from "./core/router.js";
 import { makeAskTool, makeYieldTool, PiSdkSessionHost } from "./pi/sdkHost.js";
@@ -163,7 +163,8 @@ function makeDelegateTool() {
         name: DELEGATE_TOOL,
         label: "Delegate to agent",
         description: "Fire-and-forget delegation to a persistent named agent session. Use for " +
-            "web research beyond a single known-URL fetch (multi-source research, " +
+            "deep web research that requires reading multiple sources in full " +
+            "(multi-source research, " +
             "comparisons, verification), second-pair-of-eyes review/analysis of any " +
             "target (projects and folders, but also research, plans, event concepts, " +
             "designs, documents), and " +
@@ -175,9 +176,7 @@ function makeDelegateTool() {
             "delegate is asynchronous: after calling it, keep working or tell the user you delegated; do not wait or poll for the answer.",
             "When a delegation_result message arrives, treat it as the agent's full answer and continue your task with it.",
             "When a delegation_question message arrives, the agent is blocked waiting: answer it yourself if you can, otherwise ask the user, then reply by delegating to the same agent again (the agent continues in its same session with full context).",
-            "Delegate web research to the 'research' agent: anything beyond a single known-URL fetch belongs there — multi-source research, comparisons, fact verification, version/API lookups, or any question needing several searches/reads to answer fully.",
-            "Delegate EVERY user request to review, analyze, or audit SOMETHING — a project, folder, or codebase, but equally research, plans, itineraries, event/party concepts, designs, or documents — to the 'review' agent: it is the fresh-context second pair of eyes, always delegate rather than reviewing inline; pass the target (path, file, or subject description) and any focus the user mentioned. The review agent keeps memory of previous reviews.",
-            "Do not do multi-step web research yourself; use your own web tools only for one quick fetch of a URL you already know.",
+            "Inline web tools are fine for an overview: run a search (SearXNG/web_search) and answer directly from the result summaries, or make one quick fetch of a URL you already know. The line not to cross inline is iterating over individual results — the moment you would fetch several results one by one, that is deep research: delegate it.",
             "Delegate deep codebase investigations and other long-running background work too — the agent keeps memory across calls, so repeated tasks on the same topic get cheaper.",
             "Make each delegated prompt self-contained: the agent only sees this prompt plus its own past sessions, never this conversation.",
             "The delegated prompt must contain the TASK ONLY: never forbid or restrict tool use (e.g. 'do not use tools') — the agent delivers its result via the yield_to_caller tool call, so tool restrictions in the prompt collide with the delivery protocol and degrade delivery to a fallback. Keep output-length/format wishes in the prompt; keep tool policy out of it.",
@@ -363,6 +362,19 @@ export default function persistentSubagents(pi) {
             ];
             ctx.ui.notify(lines.join("\n"), "info");
         },
+    });
+    // Caller-side profile guidance: append the `guidance` lines of all visible
+    // profiles to this run's prompt guidelines (pi dedups downstream).
+    // Recomputed every run, so local profile edits take effect immediately.
+    pi.on("before_agent_start", async (event, ctx) => {
+        const profiles = await getServices(ctx.cwd).profiles.list();
+        const extra = collectProfileGuidance(profiles);
+        if (extra.length === 0)
+            return;
+        const guidelines = event.systemPromptOptions.promptGuidelines;
+        for (const line of extra)
+            if (!guidelines.includes(line))
+                guidelines.push(line);
     });
     pi.on("session_start", async (_event, ctx) => {
         const svc = getServices(ctx.cwd);

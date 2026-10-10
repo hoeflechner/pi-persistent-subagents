@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { ProfileStore } from "../src/core/profileStore.js";
+import { ProfileStore, collectProfileGuidance } from "../src/core/profileStore.js";
 
 async function mkTmp(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "pi-profiles-test-"));
@@ -181,5 +181,76 @@ describe("profile store (YAML, one file per scope)", () => {
     expect(r?.description).toBe("mine");
     const all = await store.list();
     expect(all.filter((x) => x.name === "research")).toHaveLength(1);
+  });
+});
+
+describe("profile guidance (caller-side delegation rules)", () => {
+  it("built-in research and review profiles ship guidance", async () => {
+    const dir = await mkTmp();
+    const store = new ProfileStore({ userProfilesFile: path.join(dir, "nope.yaml") });
+    const r = await store.get("research");
+    expect(r?.guidance?.some((l) => l.includes("'research' agent"))).toBe(true);
+    const v = await store.get("review");
+    expect(v?.guidance?.some((l) => l.includes("'review' agent"))).toBe(true);
+  });
+
+  it("accepts both a list and a multiline string, trimming empties", async () => {
+    const dir = await mkTmp();
+    const file = path.join(dir, "profiles.yaml");
+    await fs.writeFile(
+      file,
+      [
+        "profiles:",
+        "  listy:",
+        "    description: d",
+        "    guidance:",
+        "      - \"  rule one  \"",
+        "      - rule two",
+        "  texty:",
+        "    description: d",
+        "    guidance: |",
+        "      line a",
+        "",
+        "      line b",
+      ].join("\n"),
+      "utf8",
+    );
+    const store = new ProfileStore({ userProfilesFile: file });
+    expect((await store.get("listy"))?.guidance).toEqual(["rule one", "rule two"]);
+    expect((await store.get("texty"))?.guidance).toEqual(["line a", "line b"]);
+  });
+
+  it("shadowing a built-in replaces its guidance wholesale", async () => {
+    const dir = await mkTmp();
+    const file = path.join(dir, "profiles.yaml");
+    const store = new ProfileStore({ userProfilesFile: file });
+    await store.set({ name: "research", description: "mine", bootstrap: "b", tools: ["*"] });
+    expect((await store.get("research"))?.guidance).toBeUndefined();
+    // ...and the shadowing profile can resupply its own lines:
+    await store.set({
+      name: "research",
+      description: "mine",
+      bootstrap: "b",
+      tools: ["*"],
+      guidance: ["only my rule"],
+    });
+    expect((await store.get("research"))?.guidance).toEqual(["only my rule"]);
+  });
+
+  it("collectProfileGuidance merges unique lines in profile order", () => {
+    const lines = collectProfileGuidance([
+      { name: "a", description: "", instructions: "", tools: [], source: "default", guidance: ["x", "shared"] },
+      { name: "b", description: "", instructions: "", tools: [], source: "default", guidance: ["shared", "y"] },
+      { name: "c", description: "", instructions: "", tools: [], source: "default" },
+    ] as never);
+    expect(lines).toEqual(["x", "shared", "y"]);
+  });
+
+  it("defaults reach the hosting prompt via collectProfileGuidance(list())", async () => {
+    const dir = await mkTmp();
+    const store = new ProfileStore({ userProfilesFile: path.join(dir, "nope.yaml") });
+    const lines = collectProfileGuidance(await store.list());
+    expect(lines.some((l) => l.includes("'research' agent"))).toBe(true);
+    expect(lines.some((l) => l.includes("'review' agent"))).toBe(true);
   });
 });

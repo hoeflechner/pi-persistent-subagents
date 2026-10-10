@@ -114,6 +114,13 @@ export interface AgentProfile {
    * always granted.
    */
   tools: string[];
+  /**
+   * Caller-side guidance: rule lines appended to the hosting agent's system
+   * prompt while this profile is visible (typically: when to delegate to it).
+   * Shadowing a built-in profile replaces its guidance — resupply the lines
+   * you want to keep.
+   */
+  guidance?: string[];
   /** Origin of the definition, for trust decisions. */
   source: "user" | "agents" | "default";
 }

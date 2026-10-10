@@ -21,6 +21,9 @@ import type { AgentProfile } from "./types.js";
  *         multiline seed instructions, injected once at session creation
  *       model: optional model pattern ("auto"/unset mirrors the caller)
  *       tools: [ ... ]        [] or ["*"] = unrestricted
+ *       guidance: [ ... ]     caller-side delegation rules injected into the
+ *                             hosting agent's prompt while this profile is
+ *                             visible (shadowing replaces them wholesale)
  *
  * A user-scope profile shadows a same-name project-scope profile.
  */
@@ -30,10 +33,22 @@ interface ProfileEntry {
     bootstrap?: string;
     model?: string;
     tools?: string[];
+    /**
+     * Caller-side delegation rules (see AgentProfile.guidance). Either a list
+     * of rule lines or one multiline string (split on newlines).
+     */
+    guidance?: string[] | string;
 }
 interface ProfilesFile {
     profiles?: Record<string, ProfileEntry>;
 }
+/** Normalize a raw guidance field into clean rule lines (undefined when empty). */
+export declare function normalizeGuidance(value: string[] | string | undefined): string[] | undefined;
+/**
+ * Merge per-profile guidance into one unique, order-stable rule list for the
+ * hosting agent's system prompt (profile order as given; first occurrence wins).
+ */
+export declare function collectProfileGuidance(profiles: AgentProfile[]): string[];
 /**
  * Built-in profiles shipped with the extension (lowest precedence). Keep in
  * sync with doc/architecture.md §11. Bootstrap text is stored as line arrays
@@ -70,6 +85,7 @@ export declare class ProfileStore {
         bootstrap: string;
         model?: string;
         tools: string[];
+        guidance?: string[] | string;
     }): Promise<AgentProfile>;
     /** Parse a profiles file into a name-keyed map. Missing/corrupt => empty. */
     private loadFile;

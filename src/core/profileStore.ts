@@ -26,6 +26,9 @@ import type { AgentProfile } from "./types.js";
  *         multiline seed instructions, injected once at session creation
  *       model: optional model pattern ("auto"/unset mirrors the caller)
  *       tools: [ ... ]        [] or ["*"] = unrestricted
+ *       guidance: [ ... ]     caller-side delegation rules injected into the
+ *                             hosting agent's prompt while this profile is
+ *                             visible (shadowing replaces them wholesale)
  *
  * A user-scope profile shadows a same-name project-scope profile.
  */
@@ -36,10 +39,38 @@ interface ProfileEntry {
   bootstrap?: string;
   model?: string;
   tools?: string[];
+  /**
+   * Caller-side delegation rules (see AgentProfile.guidance). Either a list
+   * of rule lines or one multiline string (split on newlines).
+   */
+  guidance?: string[] | string;
 }
 
 interface ProfilesFile {
   profiles?: Record<string, ProfileEntry>;
+}
+
+/** Normalize a raw guidance field into clean rule lines (undefined when empty). */
+export function normalizeGuidance(value: string[] | string | undefined): string[] | undefined {
+  if (value === undefined) return undefined;
+  const lines = (Array.isArray(value) ? value : String(value).split(/\r?\n/))
+    .map((line) => String(line).trim())
+    .filter((line) => line.length > 0);
+  return lines.length > 0 ? lines : undefined;
+}
+
+/**
+ * Merge per-profile guidance into one unique, order-stable rule list for the
+ * hosting agent's system prompt (profile order as given; first occurrence wins).
+ */
+export function collectProfileGuidance(profiles: AgentProfile[]): string[] {
+  const out: string[] = [];
+  for (const p of profiles) {
+    for (const line of p.guidance ?? []) {
+      if (!out.includes(line)) out.push(line);
+    }
+  }
+  return out;
 }
 
 /**
@@ -53,6 +84,9 @@ export const DEFAULT_PROFILES: ProfilesFile = {
       description:
         "web research: multi-source investigation, verification, comparisons. Use for any web research beyond a single known-URL fetch.",
       tools: ["*"],
+      guidance: [
+        "Delegate deep web research to the 'research' agent: any question whose answer requires reading and cross-checking individual sources — multi-source investigation, comparisons, fact verification, version/API lookups.",
+      ],
       bootstrap: [
         "# Research agent",
         "",
@@ -125,6 +159,9 @@ export const DEFAULT_PROFILES: ProfilesFile = {
       description:
         "second-pair-of-eyes review of ANY target — projects/folders, research, plans, itineraries, event/party concepts, electronics designs, documents: multi-angle gap and risk analysis with fresh, unbiased context. Use whenever the user asks to review, analyze, or audit anything.",
       tools: ["*"],
+      guidance: [
+        "Delegate EVERY user request to review, analyze, or audit SOMETHING — a project, folder, or codebase, but equally research, plans, itineraries, event/party concepts, designs, or documents — to the 'review' agent: it is the fresh-context second pair of eyes, always delegate rather than reviewing inline; pass the target (path, file, or subject description) and any focus the user mentioned. The review agent keeps memory of previous reviews.",
+      ],
       bootstrap: [
         "# Review agent",
         "",
@@ -280,15 +317,18 @@ export class ProfileStore {
     bootstrap: string;
     model?: string;
     tools: string[];
+    guidance?: string[] | string;
   }): Promise<AgentProfile> {
     const name = normalizeAgentName(input.name);
     const doc: ProfilesFile = (await this.readDoc(this.opts.userProfilesFile)) ?? {};
     if (!doc.profiles) doc.profiles = {};
+    const guidance = normalizeGuidance(input.guidance);
     const entry: ProfileEntry = {
       description: input.description,
       bootstrap: input.bootstrap,
       tools: input.tools,
       ...(input.model !== undefined ? { model: input.model } : {}),
+      ...(guidance !== undefined ? { guidance } : {}),
     };
     doc.profiles[name] = entry;
     await fs.mkdir(path.dirname(this.opts.userProfilesFile), { recursive: true });
@@ -304,6 +344,7 @@ export class ProfileStore {
       tools: input.tools,
       source: "user",
       ...(input.model !== undefined ? { model: input.model } : {}),
+      ...(guidance !== undefined ? { guidance } : {}),
     };
   }
 
@@ -335,6 +376,7 @@ export class ProfileStore {
       return undefined; // invalid name: skip; doctor reports it
     }
     if (!entry || typeof entry !== "object") return undefined;
+    const guidance = normalizeGuidance(entry.guidance);
     return {
       name,
       description: entry.description ?? "",
@@ -342,6 +384,7 @@ export class ProfileStore {
       tools: entry.tools ?? [],
       source,
       ...(entry.model !== undefined ? { model: entry.model } : {}),
+      ...(guidance !== undefined ? { guidance } : {}),
     };
   }
 
