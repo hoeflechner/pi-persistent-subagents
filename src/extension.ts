@@ -12,7 +12,7 @@ import { Type } from "typebox";
 import { canonicalProjectId, buildSessionKey } from "./core/keys.js";
 import { CallStore } from "./core/callStore.js";
 import { MailboxRegistry } from "./core/mailbox.js";
-import { ProfileStore, collectProfileGuidance } from "./core/profileStore.js";
+import { ProfileStore, appendProfileGuidance } from "./core/profileStore.js";
 import { SessionRegistry } from "./core/registry.js";
 import { DelegationRouter, renderCallback, type CallbackDeliverer } from "./core/router.js";
 import type { CallerAddress } from "./core/types.js";
@@ -354,6 +354,7 @@ export default function persistentSubagents(pi: ExtensionAPI): void {
           description: profile.description,
           bootstrap: profile.instructions,
           tools: profile.tools,
+          ...(profile.guidance !== undefined ? { guidance: profile.guidance } : {}),
           ...(pattern === "auto" ? { model: "auto" } : { model: pattern }),
         });
         // Apply immediately to a live session so the next turn uses it.
@@ -452,10 +453,7 @@ export default function persistentSubagents(pi: ExtensionAPI): void {
   // Recomputed every run, so local profile edits take effect immediately.
   pi.on("before_agent_start", async (event, ctx) => {
     const profiles = await getServices(ctx.cwd).profiles.list();
-    const extra = collectProfileGuidance(profiles);
-    if (extra.length === 0) return;
-    const guidelines = event.systemPromptOptions.promptGuidelines;
-    for (const line of extra) if (!guidelines.includes(line)) guidelines.push(line);
+    appendProfileGuidance(event.systemPromptOptions.promptGuidelines, profiles);
   });
 
   pi.on("session_start", async (_event, ctx) => {

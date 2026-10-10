@@ -50,6 +50,11 @@ export declare function normalizeGuidance(value: string[] | string | undefined):
  */
 export declare function collectProfileGuidance(profiles: AgentProfile[]): string[];
 /**
+ * Append profile guidance to a mutable prompt-guidelines list; returns the
+ * number of lines added and never duplicates an entry already present.
+ */
+export declare function appendProfileGuidance(guidelines: string[], profiles: AgentProfile[]): number;
+/**
  * Built-in profiles shipped with the extension (lowest precedence). Keep in
  * sync with doc/architecture.md §11. Bootstrap text is stored as line arrays
  * to avoid escaping Markdown backticks in template literals.

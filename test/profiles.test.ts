@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { ProfileStore, collectProfileGuidance } from "../src/core/profileStore.js";
+import { ProfileStore, collectProfileGuidance, appendProfileGuidance } from "../src/core/profileStore.js";
 
 async function mkTmp(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "pi-profiles-test-"));
@@ -220,21 +220,80 @@ describe("profile guidance (caller-side delegation rules)", () => {
     expect((await store.get("texty"))?.guidance).toEqual(["line a", "line b"]);
   });
 
-  it("shadowing a built-in replaces its guidance wholesale", async () => {
+  it("set() without guidance carries over the resolved guidance (bare edits keep policy)", async () => {
     const dir = await mkTmp();
     const file = path.join(dir, "profiles.yaml");
     const store = new ProfileStore({ userProfilesFile: file });
-    await store.set({ name: "research", description: "mine", bootstrap: "b", tools: ["*"] });
-    expect((await store.get("research"))?.guidance).toBeUndefined();
-    // ...and the shadowing profile can resupply its own lines:
+    // Simulates `/subagents model research <pattern>` against the built-in.
     await store.set({
       name: "research",
       description: "mine",
       bootstrap: "b",
       tools: ["*"],
-      guidance: ["only my rule"],
+      model: "haiku",
     });
-    expect((await store.get("research"))?.guidance).toEqual(["only my rule"]);
+    const r = await store.get("research");
+    expect(r?.source).toBe("user");
+    expect(r?.model).toBe("haiku");
+    expect(r?.guidance?.some((l) => l.includes("'research' agent"))).toBe(true);
+    const lines = collectProfileGuidance(await store.list());
+    expect(lines.some((l) => l.includes("'research' agent"))).toBe(true);
+  });
+
+  it("explicit empty guidance is the deliberate clear", async () => {
+    const dir = await mkTmp();
+    const store = new ProfileStore({ userProfilesFile: path.join(dir, "profiles.yaml") });
+    await store.set({
+      name: "research",
+      description: "mine",
+      bootstrap: "b",
+      tools: ["*"],
+      guidance: [],
+    });
+    expect((await store.get("research"))?.guidance).toBeUndefined();
+    // A shadowing hand-written YAML still replaces wholesale (no carry from defaults):
+    const dir2 = await mkTmp();
+    const file2 = path.join(dir2, "profiles.yaml");
+    await fs.writeFile(
+      file2,
+      "profiles:\n  research:\n    description: d\n    bootstrap: b\n",
+      "utf8",
+    );
+    expect((await new ProfileStore({ userProfilesFile: file2 }).get("research"))?.guidance).toBeUndefined();
+  });
+
+  it("non-string guidance entries are dropped, not stringified", async () => {
+    const dir = await mkTmp();
+    const file = path.join(dir, "profiles.yaml");
+    await fs.writeFile(
+      file,
+      [
+        "profiles:",
+        "  mixed:",
+        "    description: d",
+        "    guidance:",
+        "      - keep me",
+        "      - 42",
+        "      - true",
+        "  mapcase:",
+        "    description: d",
+        "    guidance:",
+        "      a: 1",
+        "      b: 2",
+      ].join("\n"),
+      "utf8",
+    );
+    const store = new ProfileStore({ userProfilesFile: file });
+    expect((await store.get("mixed"))?.guidance).toEqual(["keep me"]);
+    expect((await store.get("mapcase"))?.guidance).toBeUndefined();
+  });
+
+  it("appendProfileGuidance adds once, never duplicates", () => {
+    const guidelines = ["pre-existing"];
+    const profiles = [{ guidance: ["x", "y"] }] as never;
+    expect(appendProfileGuidance(guidelines, profiles)).toBe(2);
+    expect(appendProfileGuidance(guidelines, profiles)).toBe(0); // idempotent across runs
+    expect(guidelines).toEqual(["pre-existing", "x", "y"]);
   });
 
   it("collectProfileGuidance merges unique lines in profile order", () => {

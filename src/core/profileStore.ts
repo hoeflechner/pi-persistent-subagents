@@ -53,8 +53,15 @@ interface ProfilesFile {
 /** Normalize a raw guidance field into clean rule lines (undefined when empty). */
 export function normalizeGuidance(value: string[] | string | undefined): string[] | undefined {
   if (value === undefined) return undefined;
-  const lines = (Array.isArray(value) ? value : String(value).split(/\r?\n/))
-    .map((line) => String(line).trim())
+  const raw: unknown[] =
+    typeof value === "string"
+      ? value.split(/\r?\n/)
+      : Array.isArray(value)
+        ? value
+        : []; // YAML scalars like `guidance: on` or a mapping: nothing usable
+  const lines = raw
+    .filter((line): line is string => typeof line === "string")
+    .map((line) => line.trim())
     .filter((line) => line.length > 0);
   return lines.length > 0 ? lines : undefined;
 }
@@ -71,6 +78,24 @@ export function collectProfileGuidance(profiles: AgentProfile[]): string[] {
     }
   }
   return out;
+}
+
+/**
+ * Append profile guidance to a mutable prompt-guidelines list; returns the
+ * number of lines added and never duplicates an entry already present.
+ */
+export function appendProfileGuidance(
+  guidelines: string[],
+  profiles: AgentProfile[],
+): number {
+  let added = 0;
+  for (const line of collectProfileGuidance(profiles)) {
+    if (!guidelines.includes(line)) {
+      guidelines.push(line);
+      added++;
+    }
+  }
+  return added;
 }
 
 /**
@@ -322,7 +347,15 @@ export class ProfileStore {
     const name = normalizeAgentName(input.name);
     const doc: ProfilesFile = (await this.readDoc(this.opts.userProfilesFile)) ?? {};
     if (!doc.profiles) doc.profiles = {};
-    const guidance = normalizeGuidance(input.guidance);
+    // Guidance carry-over: omitting `guidance` means "keep" — the guidance
+    // of the currently RESOLVED profile (possibly a built-in default) is
+    // preserved, so a bare model/description edit never silently disables
+    // the delegation policy it shadows. An explicit empty array is the
+    // deliberate clear signal.
+    const guidance =
+      input.guidance === undefined
+        ? (await this.get(name))?.guidance
+        : normalizeGuidance(input.guidance);
     const entry: ProfileEntry = {
       description: input.description,
       bootstrap: input.bootstrap,

@@ -6,8 +6,14 @@ import { normalizeAgentName } from "./keys.js";
 export function normalizeGuidance(value) {
     if (value === undefined)
         return undefined;
-    const lines = (Array.isArray(value) ? value : String(value).split(/\r?\n/))
-        .map((line) => String(line).trim())
+    const raw = typeof value === "string"
+        ? value.split(/\r?\n/)
+        : Array.isArray(value)
+            ? value
+            : []; // YAML scalars like `guidance: on` or a mapping: nothing usable
+    const lines = raw
+        .filter((line) => typeof line === "string")
+        .map((line) => line.trim())
         .filter((line) => line.length > 0);
     return lines.length > 0 ? lines : undefined;
 }
@@ -24,6 +30,20 @@ export function collectProfileGuidance(profiles) {
         }
     }
     return out;
+}
+/**
+ * Append profile guidance to a mutable prompt-guidelines list; returns the
+ * number of lines added and never duplicates an entry already present.
+ */
+export function appendProfileGuidance(guidelines, profiles) {
+    let added = 0;
+    for (const line of collectProfileGuidance(profiles)) {
+        if (!guidelines.includes(line)) {
+            guidelines.push(line);
+            added++;
+        }
+    }
+    return added;
 }
 /**
  * Built-in profiles shipped with the extension (lowest precedence). Keep in
@@ -255,7 +275,14 @@ export class ProfileStore {
         const doc = (await this.readDoc(this.opts.userProfilesFile)) ?? {};
         if (!doc.profiles)
             doc.profiles = {};
-        const guidance = normalizeGuidance(input.guidance);
+        // Guidance carry-over: omitting `guidance` means "keep" — the guidance
+        // of the currently RESOLVED profile (possibly a built-in default) is
+        // preserved, so a bare model/description edit never silently disables
+        // the delegation policy it shadows. An explicit empty array is the
+        // deliberate clear signal.
+        const guidance = input.guidance === undefined
+            ? (await this.get(name))?.guidance
+            : normalizeGuidance(input.guidance);
         const entry = {
             description: input.description,
             bootstrap: input.bootstrap,
