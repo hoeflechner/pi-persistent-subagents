@@ -128,4 +128,12 @@ npm install && npm run build && npm test
 
 Design and invariants: [`doc/architecture.md`](doc/architecture.md).
 `dist/` is committed (Pi loads it directly) — **always `npm run build` before
-committing `src/`**.
+committing `src/`**, and check it before you push:
+
+```bash
+npm run check:dist   # builds and fails if the committed dist/ does not match src/
+```
+
+A commit whose `dist/` lags `src/` makes every `pi update` checkout a torn tree
+(new caller, old callee), which surfaces in unrelated sessions as a load-time
+`TypeError` (seen 2026-10-12 with `appendProfileGuidance is not a function`).
