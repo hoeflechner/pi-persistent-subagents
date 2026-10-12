@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import { existsSync, rmSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import {
   defineTool,
@@ -11,6 +12,7 @@ import {
 import { Type } from "typebox";
 import { canonicalProjectId, buildSessionKey } from "./core/keys.js";
 import { CallStore } from "./core/callStore.js";
+import { Liveness } from "./core/liveness.js";
 import { MailboxRegistry } from "./core/mailbox.js";
 import { ProfileStore, appendProfileGuidance } from "./core/profileStore.js";
 import { SessionRegistry } from "./core/registry.js";
@@ -37,6 +39,9 @@ interface Services {
   profiles: ProfileStore;
   registry: SessionRegistry;
   calls: CallStore;
+  /** Which extension instances (processes) are alive, via marker files — the
+   * scope rule for interrupting calls at startup (core/liveness.ts). */
+  liveness: Liveness;
   mailboxes: MailboxRegistry;
   host: PiSdkSessionHost;
   router: DelegationRouter;
@@ -73,6 +78,11 @@ function getStateDir(): string {
   return process.env.PI_SUBAGENTS_STATE_DIR ?? path.join(getAgentDir(), "subagents");
 }
 
+/** Identifies this extension instance (process). Recorded on every call this
+ * instance creates, so another instance's startup recovery leaves those calls
+ * alone while this process is still stamping its liveness marker. */
+const INSTANCE_ID = randomUUID();
+
 function getServices(cwd: string): Services {
   const key = path.resolve(cwd);
   const existing = servicesByCwd.get(key);
@@ -89,7 +99,8 @@ function getServices(cwd: string): Services {
       path.join(path.dirname(getAgentDir()), "agents"),
   });
   const registry = new SessionRegistry(stateDir);
-  const calls = new CallStore(stateDir);
+  const calls = new CallStore(stateDir, INSTANCE_ID);
+  const liveness = new Liveness(stateDir, INSTANCE_ID);
   const mailboxes = new MailboxRegistry();
 
   const svc = {} as Services;
@@ -179,12 +190,16 @@ function getServices(cwd: string): Services {
   svc.profiles = profiles;
   svc.registry = registry;
   svc.calls = calls;
+  svc.liveness = liveness;
   svc.mailboxes = mailboxes;
   svc.host = host;
   svc.router = router;
   svc.liveRoots = new Map();
   svc.callerContext = new Map();
   svc.inFlight = new Map();
+  // Stamp this instance live: a session starting in another process must not
+  // reap the calls this one is driving.
+  liveness.start();
   servicesByCwd.set(key, svc);
   return svc;
 }
@@ -463,10 +478,12 @@ export default function persistentSubagents(pi: ExtensionAPI): void {
       api: pi,
       sessionFile: ctx.sessionManager.getSessionFile() ?? undefined,
     });
-    // Recover interrupted calls, then flush ONLY callbacks addressed to
-    // THIS session (plus managed ones) — never everybody's pending at once.
+    svc.liveness.start();
+    // Recover ONLY calls whose owning instance is gone, then flush ONLY
+    // callbacks addressed to THIS session (plus managed ones).
     const { recovered, delivered } = await svc.router.reconcile({
       rootSessionId: sessionId,
+      liveInstances: svc.liveness.liveInstances(),
     });
     if (recovered || delivered) {
       pi.sendMessage(
@@ -485,7 +502,9 @@ export default function persistentSubagents(pi: ExtensionAPI): void {
 
   // Drop the live handle on shutdown so callbacks addressed to this session
   // stay pending (redriven at its next start) instead of being injected into
-  // a dead runtime.
+  // a dead runtime. Deliberately does NOT touch this session's calls: the
+  // instance may still be running them, and a settled result that cannot be
+  // delivered yet is worth more than a forced failure.
   pi.on("session_shutdown", async (_event, ctx) => {
     getServices(ctx.cwd).liveRoots.delete(ctx.sessionManager.getSessionId());
   });

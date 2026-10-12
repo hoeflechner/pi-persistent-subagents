@@ -14,6 +14,7 @@ import type { CallerAddress } from "../src/core/types.js";
 const PROJECT = canonicalProjectId("/repo/demo");
 
 interface Harness {
+  dir: string;
   router: DelegationRouter;
   profiles: ProfileStore;
   registry: SessionRegistry;
@@ -33,13 +34,14 @@ class FakeDeliverer implements CallbackDeliverer {
   }
 }
 
-async function makeHarness(): Promise<Harness> {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-subagents-test-"));
+async function makeHarness(opts?: { dir?: string; instanceId?: string }): Promise<Harness> {
+  const dir =
+    opts?.dir ?? (await fs.mkdtemp(path.join(os.tmpdir(), "pi-subagents-test-")));
   const profiles = new ProfileStore({ userProfilesFile: path.join(dir, "profiles.yaml") });
   await profiles.set({ name: "research", description: "", bootstrap: "You are a research agent.", tools: ["read"]});
   await profiles.set({ name: "planner", description: "", bootstrap: "You are a planner.", tools: ["read"]});
   const registry = new SessionRegistry(dir);
-  const calls = new CallStore(dir);
+  const calls = new CallStore(dir, opts?.instanceId);
   const mailboxes = new MailboxRegistry();
   const host = new FakeSessionHost();
   const deliverer = new FakeDeliverer();
@@ -52,7 +54,7 @@ async function makeHarness(): Promise<Harness> {
     host,
     deliverer,
   });
-  return { router, profiles, registry, calls, mailboxes, host, deliverer };
+  return { dir, router, profiles, registry, calls, mailboxes, host, deliverer };
 }
 
 const rootCaller = (): { address: CallerAddress; ancestry: string[]; depth: number } => ({
@@ -282,6 +284,40 @@ describe("delegate router", () => {
     expect(record?.status).toBe("failed");
     expect(record?.callbackDeliveredAt).toBeTruthy();
     expect(record?.error).toBe("interrupted-by-restart");
+  });
+
+  it("does not interrupt calls another live instance is driving (scoped recovery)", async () => {
+    const a = await makeHarness({ instanceId: "proc-a" });
+    a.deliverer.reachable = false;
+    const mine = await a.router.delegate({ agent: "research", prompt: "x" }, rootCaller());
+    await a.mailboxes.allIdle();
+    await a.calls.update(mine.callId, { status: "running" });
+
+    // A second process over the same global store starts. proc-a has no fresh
+    // marker, so only the call it owned may be reaped.
+    const b = await makeHarness({ dir: a.dir, instanceId: "proc-b" });
+    b.deliverer.reachable = false;
+    const neighbour = await b.router.delegate(
+      { agent: "planner", prompt: "y" },
+      {
+        address: { kind: "root", sessionId: "neighbour-session", label: "other" },
+        ancestry: [],
+        depth: 0,
+      },
+    );
+    await b.mailboxes.allIdle();
+    await b.calls.update(neighbour.callId, { status: "queued" });
+
+    b.deliverer.reachable = true;
+    const { recovered } = await b.router.reconcile({
+      rootSessionId: "neighbour-session",
+      liveInstances: new Set(["proc-b"]),
+    });
+
+    expect(recovered).toBe(1);
+    expect((await b.calls.get(mine.callId))?.status).toBe("failed");
+    // Owned by a still-live instance: its queued work is not touched.
+    expect((await b.calls.get(neighbour.callId))?.status).toBe("queued");
   });
 
   it("rejects unknown agents with the list of known profiles", async () => {

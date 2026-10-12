@@ -53,6 +53,12 @@ export interface CallRecord {
     summary?: string;
     /** Machine-readable failure reason, e.g. "interrupted-by-restart". */
     error?: string;
+    /** Extension instance (process) that runs this call — its mailbox and the
+     * managed session live there. Set on create from the store's instance id;
+     * liveness of that instance decides whether a `queued`/`running` call is
+     * interrupted or still alive (core/liveness.ts). Absent on records written
+     * before per-instance markers existed: treated as dead, i.e. reaped. */
+    ownerInstanceId?: string;
     /** Set once the callback has been injected into the caller. */
     callbackDeliveredAt?: string;
     /** True when the call was routed as a same-session follow-up. */

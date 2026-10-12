@@ -1,7 +1,10 @@
 import type { CallRecord } from "./types.js";
 export declare class CallStore {
+    private readonly instanceId?;
     private readonly store;
-    constructor(stateDir: string);
+    /** `instanceId` identifies this extension instance (process); calls created
+     * here are owned by it and survive another instance's startup recovery. */
+    constructor(stateDir: string, instanceId?: string | undefined);
     create(record: CallRecord): Promise<void>;
     get(callId: string): Promise<CallRecord | undefined>;
     update(callId: string, patch: Partial<CallRecord>): Promise<CallRecord>;
@@ -17,9 +20,12 @@ export declare class CallStore {
      * but not yet delivered. Local follow-ups never call back. */
     pendingCallbacks(): Promise<CallRecord[]>;
     /**
-     * On startup, any call still `running` was interrupted by process loss.
-     * Recover as failed-interrupted; never assume the external effect happened.
+     * On startup, a call still `running` or `queued` is interrupted ONLY if the
+     * instance that owns it is gone: this store is global, so another live
+     * process may be driving that call right now. `liveInstances` comes from the
+     * liveness markers (core/liveness.ts); pass an empty set for a deliberate
+     * full sweep. Never assume the external effect happened.
      */
-    recoverInterrupted(): Promise<CallRecord[]>;
+    recoverInterrupted(liveInstances: Set<string>): Promise<CallRecord[]>;
     list(): Promise<CallRecord[]>;
 }

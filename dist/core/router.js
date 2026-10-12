@@ -171,9 +171,13 @@ export class DelegationRouter {
         return delivered;
     }
     /** Startup: recover interrupted calls, then flush callbacks addressed to
-     * the starting session (scoped like flushOutbox). */
+     * the starting session (scoped like flushOutbox). Recovery is scoped by the
+     * same rule: `liveInstances` are the extension instances still running (see
+     * core/liveness.ts) — an empty set is a deliberate full sweep and must not
+     * be used on a normal session start, which would interrupt calls another
+     * process is driving. */
     async reconcile(opts) {
-        const recovered = await this.deps.calls.recoverInterrupted();
+        const recovered = await this.deps.calls.recoverInterrupted(opts?.liveInstances ?? new Set());
         const delivered = await this.flushOutbox(opts);
         return { recovered: recovered.length, delivered };
     }

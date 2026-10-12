@@ -378,8 +378,14 @@ ignores `triggerTurn` in that mode and waits for the next user prompt. Reserve
 2. Reconcile undelivered callback outbox items.
 3. Do not eagerly prompt sessions.
 4. Reopen a session lazily on its next call or pending callback delivery.
-5. Recover stale `running` call records as interrupted; never assume an external
-   effect did not happen.
+5. Recover `queued`/`running` call records as interrupted **only when the
+   extension instance that owns them is gone**: every instance keeps a marker in
+   `<stateDir>/live/<instanceId>` refreshed by a heartbeat, and a call carries
+   the id of the instance that created it. `calls.json` is one global store, so
+   a session starting in one process must never interrupt calls another live
+   process is driving (2026-10-12: an unscoped sweep killed 4/4 in-flight
+   delegations). A crashed instance stops stamping; its calls are reaped once
+   the marker goes stale. Never assume an external effect did not happen.
 
 ### Normal shutdown
 

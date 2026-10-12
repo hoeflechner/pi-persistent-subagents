@@ -18,7 +18,12 @@ interface CallsFile {
 export class CallStore {
   private readonly store: JsonStore<CallsFile>;
 
-  constructor(stateDir: string) {
+  /** `instanceId` identifies this extension instance (process); calls created
+   * here are owned by it and survive another instance's startup recovery. */
+  constructor(
+    stateDir: string,
+    private readonly instanceId?: string,
+  ) {
     this.store = createJsonStore<CallsFile>(path.join(stateDir, "calls.json"), () => ({
       schemaVersion: 1,
       calls: {},
@@ -30,7 +35,9 @@ export class CallStore {
       if (state.calls[record.callId]) {
         throw new Error(`duplicate callId ${record.callId}`);
       }
-      state.calls[record.callId] = record;
+      state.calls[record.callId] = this.instanceId
+        ? { ...record, ownerInstanceId: this.instanceId }
+        : record;
     });
   }
 
@@ -93,21 +100,24 @@ export class CallStore {
   }
 
   /**
-   * On startup, any call still `running` was interrupted by process loss.
-   * Recover as failed-interrupted; never assume the external effect happened.
+   * On startup, a call still `running` or `queued` is interrupted ONLY if the
+   * instance that owns it is gone: this store is global, so another live
+   * process may be driving that call right now. `liveInstances` comes from the
+   * liveness markers (core/liveness.ts); pass an empty set for a deliberate
+   * full sweep. Never assume the external effect happened.
    */
-  async recoverInterrupted(): Promise<CallRecord[]> {
+  async recoverInterrupted(liveInstances: Set<string>): Promise<CallRecord[]> {
     const recovered: CallRecord[] = [];
     await this.store.update((state) => {
       for (const call of Object.values(state.calls)) {
-        if (call.status === "running" || call.status === "queued") {
-          call.status = "failed";
-          call.summary =
-            "Interrupted: the extension restarted while this call was active. The delegated turn may or may not have completed; do not assume its effects happened.";
-          call.error = "interrupted-by-restart";
-          call.settledAt = new Date().toISOString();
-          recovered.push(call);
-        }
+        if (call.status !== "running" && call.status !== "queued") continue;
+        if (call.ownerInstanceId && liveInstances.has(call.ownerInstanceId)) continue;
+        call.status = "failed";
+        call.summary =
+          "Interrupted: the extension restarted while this call was active. The delegated turn may or may not have completed; do not assume its effects happened.";
+        call.error = "interrupted-by-restart";
+        call.settledAt = new Date().toISOString();
+        recovered.push(call);
       }
     });
     return recovered;

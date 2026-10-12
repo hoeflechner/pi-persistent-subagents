@@ -71,9 +71,14 @@ export declare class DelegationRouter {
         rootSessionId?: string;
     }): Promise<number>;
     /** Startup: recover interrupted calls, then flush callbacks addressed to
-     * the starting session (scoped like flushOutbox). */
+     * the starting session (scoped like flushOutbox). Recovery is scoped by the
+     * same rule: `liveInstances` are the extension instances still running (see
+     * core/liveness.ts) — an empty set is a deliberate full sweep and must not
+     * be used on a normal session start, which would interrupt calls another
+     * process is driving. */
     reconcile(opts?: {
         rootSessionId?: string;
+        liveInstances?: Set<string>;
     }): Promise<{
         recovered: number;
         delivered: number;
